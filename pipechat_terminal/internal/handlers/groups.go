@@ -108,6 +108,15 @@ func joinGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A website group is only for its members: knowing the key is not enough once someone was removed.
+	if website, member, err := database.WebGroupMember(r.Context(), Pool, groupID, own.userID); err != nil {
+		serverError(w, "check membership", err)
+		return
+	} else if website && !member {
+		writeError(w, http.StatusForbidden, "you are no longer a member of this group")
+		return
+	}
+
 	// History and subscription happen under one lock, so no message is missed or sent twice.
 	live.mutex.Lock()
 	defer live.mutex.Unlock()

@@ -25,6 +25,7 @@ const websiteSchema = `
 CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
+CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
 // terminal is a client Model wired to a real server, with its events pumped by hand.
@@ -75,7 +76,7 @@ func TestWebsiteGroupReachesTheTerminal(t *testing.T) { websiteGroupFlow(t, fals
 // With escrow the server hands the key over, so the new member gets in with nobody else online.
 func TestWebsiteGroupWithEscrowNeedsNoOneOnline(t *testing.T) { websiteGroupFlow(t, true) }
 
-func websiteGroupFlow(t *testing.T, escrow bool) {
+func websiteGroupFlow(t *testing.T, escrow bool) (alice, bob *terminal) {
 	base := os.Getenv("CHAT_TEST_DATABASE_URL")
 	if base == "" {
 		t.Skip("set CHAT_TEST_DATABASE_URL to a PostgreSQL URL to run this test")
@@ -118,8 +119,8 @@ func websiteGroupFlow(t *testing.T, escrow bool) {
 	pool.QueryRow(`INSERT INTO chat_groups (name, owner_id) VALUES ('crew', $1) RETURNING id`, ids["alice"]).Scan(&group)
 	pool.Exec(`INSERT INTO chat_group_members (group_id, user_id) VALUES ($1, $2)`, group, ids["alice"])
 
-	alice := newTerminal(t, server.URL, "alice@example.com")
-	bob := newTerminal(t, server.URL, "bob@example.com")
+	alice = newTerminal(t, server.URL, "alice@example.com")
+	bob = newTerminal(t, server.URL, "bob@example.com")
 
 	// Alice's terminal creates the group and tells the website its chat id.
 	alice.sync()
@@ -180,5 +181,38 @@ func websiteGroupFlow(t *testing.T, escrow bool) {
 	}
 	if !delivered {
 		t.Fatal("the website was not told bob has the group")
+	}
+	return alice, bob
+}
+
+// The creator removes a member; the member's terminal drops the group when it next tries to join.
+func TestKickedMemberLosesTheGroup(t *testing.T) {
+	alice, bob := websiteGroupFlow(t, true)
+
+	alice.m.input.SetValue("/kick @bob")
+	alice.m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	alice.until("the kick to be answered", func() bool {
+		for _, line := range alice.m.groups[1].entries {
+			if strings.Contains(line.text, "removed @bob") {
+				return true
+			}
+		}
+		return false
+	})
+
+	bob.m.joinGroupAsync(bob.m.groups[1])
+	bob.until("bob to lose the group", func() bool { return len(bob.m.groups) == 1 })
+	found := false
+	for _, line := range bob.m.groups[0].entries {
+		found = found || strings.Contains(line.text, "removed from the group crew")
+	}
+	if !found {
+		t.Fatal("bob was not told why the group went")
+	}
+
+	// Logging in again does not bring the group back.
+	bob2 := newTerminal(t, alice.m.server.URL(), "bob@example.com")
+	if len(bob2.m.groups) != 1 {
+		t.Fatalf("a removed member got the group back on login: %d groups", len(bob2.m.groups))
 	}
 }

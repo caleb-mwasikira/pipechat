@@ -6,6 +6,13 @@ import (
 	"errors"
 )
 
+var (
+	ErrNotWebGroup = errors.New("that group was not made on the website")
+	ErrNotOwner    = errors.New("only the group's creator can remove members")
+	ErrNotMember   = errors.New("that user is not in the group")
+	ErrKickOwner   = errors.New("the creator cannot be removed")
+)
+
 // The website owns these tables: users, chat_groups, chat_group_members and
 // chat_group_grants (see database/migrations in the Laravel app). The chat server
 // reads them to log people in and to hand group keys from member to member.
@@ -276,6 +283,63 @@ func AcceptGrant(ctx context.Context, pool *sql.DB, userID int64, group int64) e
 	}
 	if _, err := transaction.ExecContext(ctx, `UPDATE chat_group_members SET delivered = true WHERE group_id = $1 AND user_id = $2`, group, userID); err != nil {
 		return err
+	}
+	return transaction.Commit()
+}
+
+// WebGroupMember says whether a chat group id belongs to a website group and, if so, whether the
+// user is still one of its members. Groups made only in a terminal are open to whoever has the key.
+func WebGroupMember(ctx context.Context, pool *sql.DB, gid string, userID int64) (website bool, member bool, err error) {
+	var groups, members int
+	err = pool.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT g.id), COUNT(m.user_id)
+		FROM chat_groups g
+		LEFT JOIN chat_group_members m ON m.group_id = g.id AND m.user_id = $2
+		WHERE g.gid = $1`, gid, userID).Scan(&groups, &members)
+	return groups > 0, members > 0, err
+}
+
+// KickMember removes a member from a website group on the creator's say-so. It returns the
+// handle's chat group id check results as one of the Err values above.
+func KickMember(ctx context.Context, pool *sql.DB, ownerID int64, gid string, handle string) error {
+	transaction, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+
+	var group, owner int64
+	if err := transaction.QueryRowContext(ctx, `SELECT id, owner_id FROM chat_groups WHERE gid = $1`, gid).Scan(&group, &owner); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotWebGroup
+	} else if err != nil {
+		return err
+	}
+	if owner != ownerID {
+		return ErrNotOwner
+	}
+	var target int64
+	if err := transaction.QueryRowContext(ctx, `SELECT user_id FROM accounts WHERE handle = $1 AND user_id IS NOT NULL`, handle).Scan(&target); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotMember
+	} else if err != nil {
+		return err
+	}
+	if target == owner {
+		return ErrKickOwner
+	}
+	result, err := transaction.ExecContext(ctx, `DELETE FROM chat_group_members WHERE group_id = $1 AND user_id = $2`, group, target)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrNotMember
+	}
+	for _, statement := range []string{
+		`DELETE FROM chat_group_grants WHERE group_id = $1 AND user_id = $2`,
+		`DELETE FROM chat_group_invites WHERE group_id = $1 AND invitee_id = $2`,
+	} {
+		if _, err := transaction.ExecContext(ctx, statement, group, target); err != nil {
+			return err
+		}
 	}
 	return transaction.Commit()
 }

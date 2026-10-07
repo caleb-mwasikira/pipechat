@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/ecdh"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -194,5 +195,38 @@ func syncGrantReceived(w http.ResponseWriter, r *http.Request) {
 		serverError(w, "accept grant", err)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/sync/kick: the creator of a website group removes a member. They lose their place on
+// the website, the server stops delivering the group's messages to them, and their terminal drops it.
+func syncKick(w http.ResponseWriter, r *http.Request) {
+	var request kickRequest
+	if !readJSON(w, r, &request) {
+		return
+	}
+	err := database.KickMember(r.Context(), Pool, currentSession(r).userID, request.GID, request.Handle)
+	switch {
+	case errors.Is(err, database.ErrNotWebGroup):
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	case errors.Is(err, database.ErrNotOwner):
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	case errors.Is(err, database.ErrNotMember), errors.Is(err, database.ErrKickOwner):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		serverError(w, "kick", err)
+		return
+	}
+
+	live.mutex.Lock()
+	for kicked := range live.online[request.Handle] {
+		delete(live.members[request.GID], kicked)
+		delete(kicked.joined, request.GID)
+		deliver(kicked, event{Type: "kick", GID: request.GID})
+	}
+	live.mutex.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -333,3 +333,8 @@ func (s *Server) SyncGrantReceived(webGroup int64) error {
 func (s *Server) SyncEscrow(webGroup int64, sealed []byte) error {
 	return s.call("POST", "/api/sync/escrow", map[string]any{"group": webGroup, "sealed": sealed}, nil)
 }
+
+// KickMember removes someone from a website group; only the group's creator may.
+func (s *Server) KickMember(groupID string, handle string) error {
+	return s.call("POST", "/api/sync/kick", map[string]any{"gid": groupID, "handle": handle}, nil)
+}

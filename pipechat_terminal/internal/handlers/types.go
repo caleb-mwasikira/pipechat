@@ -87,3 +87,8 @@ type escrowRequest struct {
 	Group  int64  `json:"group"`
 	Sealed []byte `json:"sealed"` // the group's invite code sealed to the server's public key
 }
+
+type kickRequest struct {
+	GID    string `json:"gid"`
+	Handle string `json:"handle"`
+}

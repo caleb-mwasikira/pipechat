@@ -63,6 +63,7 @@ const websiteSchema = `
 CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
+CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
 // useServer starts the routes on a fresh database schema and returns the server's address.
@@ -583,5 +584,70 @@ func TestEscrowHandsKeysOverWithoutAMemberOnline(t *testing.T) {
 	call(t, "GET", base+"/api/sync", bob, nil, &sync)
 	if len(sync.Incoming) != 1 || sync.Incoming[0].FromKey != sync.ServerKey {
 		t.Fatalf("bob should get the key from the server: %+v", sync.Incoming)
+	}
+}
+
+func TestCreatorCanRemoveAMember(t *testing.T) {
+	base := useServer(t)
+	alice := registerUser(t, base, "alice")
+	bob := registerUser(t, base, "bob")
+	carol := registerUser(t, base, "carol")
+	var ids = map[string]int64{}
+	for _, handle := range []string{"alice", "bob", "carol"} {
+		var id int64
+		Pool.QueryRow(`SELECT id FROM users WHERE handle = $1`, handle).Scan(&id)
+		ids[handle] = id
+	}
+	const gid = "00000000000000bb"
+	token := strings.Repeat("cd", 32)
+	var group int64
+	Pool.QueryRow(`INSERT INTO chat_groups (name, owner_id, gid) VALUES ('crew', $1, $2) RETURNING id`, ids["alice"], gid).Scan(&group)
+	for _, handle := range []string{"alice", "bob"} {
+		Pool.Exec(`INSERT INTO chat_group_members (group_id, user_id, delivered) VALUES ($1, $2, true)`, group, ids[handle])
+	}
+	call(t, "POST", base+"/api/groups", alice, createGroupRequest{GID: gid, Tok: token}, nil)
+	for _, member := range []string{alice, bob} {
+		if status := call(t, "POST", base+"/api/groups/"+gid+"/join", member, joinRequest{Tok: token}, nil); status != 200 {
+			t.Fatalf("member join: %d", status)
+		}
+	}
+	bobEvents := listen(t, base, bob)
+
+	kick := func(token string, handle string) int {
+		return call(t, "POST", base+"/api/sync/kick", token, kickRequest{GID: gid, Handle: handle}, nil)
+	}
+	if status := kick(bob, "alice"); status != http.StatusForbidden {
+		t.Fatalf("a member removing the creator: %d", status)
+	}
+	if status := kick(carol, "bob"); status != http.StatusForbidden {
+		t.Fatalf("an outsider removing a member: %d", status)
+	}
+	if status := kick(alice, "alice"); status != http.StatusConflict {
+		t.Fatalf("removing the creator: %d", status)
+	}
+	if status := kick(alice, "carol"); status != http.StatusConflict {
+		t.Fatalf("removing a non-member: %d", status)
+	}
+	if status := kick(alice, "bob"); status != http.StatusNoContent {
+		t.Fatalf("remove: %d", status)
+	}
+
+	if message := next(t, bobEvents); message.Type != "kick" || message.GID != gid {
+		t.Fatalf("bob should be told: %+v", message)
+	}
+	var count int
+	Pool.QueryRow(`SELECT COUNT(*) FROM chat_group_members WHERE group_id = $1`, group).Scan(&count)
+	if count != 1 {
+		t.Fatalf("members left: %d", count)
+	}
+	// Having the key is no longer enough.
+	if status := call(t, "POST", base+"/api/groups/"+gid+"/join", bob, joinRequest{Tok: token}, nil); status != http.StatusForbidden {
+		t.Fatalf("join after removal: %d", status)
+	}
+	if status := call(t, "POST", base+"/api/groups/"+gid+"/messages", bob, sendRequest{CT: []byte("hi")}, nil); status != http.StatusForbidden {
+		t.Fatalf("send after removal: %d", status)
+	}
+	if status := call(t, "POST", base+"/api/groups/"+gid+"/messages", alice, sendRequest{CT: []byte("hi")}, nil); status != http.StatusNoContent {
+		t.Fatalf("the creator can still send: %d", status)
 	}
 }

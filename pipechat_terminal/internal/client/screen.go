@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,7 +33,6 @@ var (
 	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
 	sidebarStyle  = lipgloss.NewStyle().Width(sidebarWidth).BorderRight(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240"))
 	authBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(1, 3)
-	helpText      = "Commands: /create NAME · /join CODE · /invite EMAIL · /code · /dm HANDLE · /whois HANDLE · /groups · /switch N · /leave · /clear · /help · /exit\nFiles: /upload PATH [-name SHORT] · /download SHORT|LINK [DIR] · /files · /link SHORT · /share SHORT\nTab or Ctrl+N / Ctrl+P switch groups. PgUp/PgDn scroll."
 	maxMessageLen = 2000
 )
 
@@ -43,6 +43,7 @@ type entry struct {
 	text   string
 	self   bool
 	seq    uint64 // server sequence number, 0 for notices
+	raw    bool   // already styled: show as it is, with no time stamp
 }
 
 type groupState struct {
@@ -122,6 +123,12 @@ type requestFailed struct {
 	err   error
 }
 
+type kickResult struct {
+	group  *groupState
+	handle string
+	err    error
+}
+
 type inviteResult struct {
 	to  string
 	err error
@@ -156,6 +163,8 @@ type Model struct {
 	relogging     bool
 	pendingNotice string
 	syncing       bool
+	showHelp      bool // the full-screen help guide is open
+	helpView      viewport.Model
 	syncBusy      map[string]time.Time // website group work already under way, and since when
 	uploadTarget  *groupState
 	busy          bool          // an upload or download is running
@@ -260,6 +269,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = max(10, m.width-sidebarWidth-2)
 		m.viewport.Height = max(3, m.height-4)
 		m.input.Width = max(10, m.width-4)
+		m.helpView.Width, m.helpView.Height = m.width, max(3, m.height-3)
+		if m.showHelp {
+			m.helpView.SetContent(helpGuide(m.width))
+		}
 		m.refresh()
 		return m, nil
 
@@ -341,6 +354,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice(current, "download failed: "+message.Err.Error())
 		} else {
 			m.notice(current, fmt.Sprintf("downloaded %s (%s) to %s: %s", message.Name, formatSize(message.Bytes), message.Dir, strings.Join(message.Entries, ", ")))
+		}
+		return m, nil
+
+	case kickResult:
+		target := message.group
+		if m.findGroupState(target) < 0 {
+			target = m.groups[m.current]
+		}
+		if message.err != nil {
+			m.notice(target, "could not remove @"+message.handle+": "+message.err.Error())
+		} else {
+			m.notice(target, "removed @"+message.handle+" from the group. They can no longer read or send messages in it.")
 		}
 		return m, nil
 
@@ -498,13 +523,14 @@ func (m *Model) handleAuth(result authResult) {
 	m.store.LastEmail = m.session.email
 	m.store.Save()
 	m.input.Focus()
-	m.notice(m.groups[0], "Welcome, @"+m.session.handle+".")
+	for _, line := range welcomeLines(m.session.handle, crypto.Fingerprint(hex.EncodeToString(m.identity.PublicKey().Bytes()))) {
+		m.groups[0].entries = append(m.groups[0].entries, entry{text: line, raw: true})
+	}
 	if m.pendingNotice != "" {
 		m.notice(m.groups[0], m.pendingNotice)
 		m.pendingNotice = ""
 	}
-	m.notice(m.groups[0], "Your key fingerprint: "+crypto.Fingerprint(hex.EncodeToString(m.identity.PublicKey().Bytes())))
-	m.notice(m.groups[0], helpText)
+	m.refresh()
 	for _, peer := range m.vault.Direct {
 		m.startDirect(peer, false)
 	}
@@ -556,6 +582,10 @@ func (m *Model) handleEvent(event Event) {
 		m.receive(event)
 	case "dm":
 		m.startDirect(event.Handle, false)
+	case "kick":
+		if g := m.findGroup(event.GID); g != nil {
+			m.droppedFromGroup(g)
+		}
 	}
 	m.refresh()
 }
@@ -583,6 +613,16 @@ func (m *Model) handleJoined(result joinResult) {
 		return // left in the meantime
 	}
 	if result.err != nil {
+		var failure *apiError
+		if errors.As(result.err, &failure) && failure.Status == http.StatusForbidden && strings.Contains(failure.Message, "no longer a member") {
+			if g.adding {
+				m.removeGroup(g)
+				m.notice(m.groups[m.current], "could not join "+g.secret.Name+": "+failure.Message)
+			} else {
+				m.droppedFromGroup(g)
+			}
+			return
+		}
 		if g.adding {
 			m.removeGroup(g)
 			m.notice(m.groups[m.current], "could not add group: "+result.err.Error())
@@ -783,6 +823,16 @@ func (m *Model) findGroup(id string) *groupState {
 	return nil
 }
 
+// droppedFromGroup forgets a group the creator removed us from.
+func (m *Model) droppedFromGroup(g *groupState) {
+	name := g.secret.Name
+	delete(m.store.LastSeq, g.secret.GIDHex())
+	m.removeGroup(g)
+	m.saveVault()
+	m.notice(m.groups[0], "You were removed from the group "+name+" by its creator.")
+	m.switchTo(m.current)
+}
+
 func (m *Model) removeGroup(target *groupState) {
 	for index, g := range m.groups {
 		if g == target {
@@ -887,6 +937,16 @@ func (m *Model) send(g *groupState, content payload) error {
 // ---- chat screen ----
 
 func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.showHelp {
+		switch key.String() {
+		case "esc", "q", "enter", " ", "ctrl+h", "/":
+			m.showHelp = false
+			return m, tea.ClearScreen
+		}
+		var command tea.Cmd
+		m.helpView, command = m.helpView.Update(key)
+		return m, command
+	}
 	switch key.String() {
 	case "tab", "ctrl+n":
 		m.switchTo((m.current + 1) % len(m.groups))
@@ -933,7 +993,12 @@ func (m *Model) runCommand(text string) tea.Cmd {
 
 	switch name {
 	case "/help":
-		m.notice(current, helpText)
+		// A full-screen guide on a cleared screen; Esc brings the chat back.
+		m.showHelp = true
+		m.helpView.Width, m.helpView.Height = m.width, max(3, m.height-3)
+		m.helpView.SetContent(helpGuide(m.width))
+		m.helpView.GotoTop()
+		return tea.ClearScreen
 
 	case "/quit", "/exit":
 		return tea.Quit
@@ -1074,6 +1139,22 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		}
 		m.switchTo(index)
 
+	case "/kick":
+		handle := strings.ToLower(strings.TrimPrefix(argument, "@"))
+		switch {
+		case current.secret == nil || current.direct:
+			m.notice(current, "open one of your groups first")
+		case !crypto.ValidHandle(handle):
+			m.notice(current, "usage: /kick HANDLE")
+		case handle == m.session.handle:
+			m.notice(current, "you cannot remove yourself; use /leave")
+		default:
+			id := current.secret.GIDHex()
+			m.server.enqueue(func() {
+				m.server.report(kickResult{group: current, handle: handle, err: m.server.KickMember(id, handle)})
+			})
+		}
+
 	case "/leave":
 		if current.secret == nil {
 			m.notice(current, "nothing to leave here")
@@ -1130,6 +1211,8 @@ func (m *Model) refresh() {
 	for _, line := range m.groups[m.current].entries {
 		stamp := dimStyle.Render(line.when.Format("15:04"))
 		switch {
+		case line.raw:
+			lines = append(lines, line.text)
 		case line.handle == "":
 			lines = append(lines, wrap.Render(stamp+" "+dimStyle.Render(line.text)))
 		case line.self:
@@ -1150,6 +1233,11 @@ func (m *Model) View() string {
 		return m.connectView()
 	case m.session == nil:
 		return m.authView()
+	}
+	if m.showHelp {
+		title := titleStyle.Render("Pipechat") + dimStyle.Render("  help")
+		footer := dimStyle.Render("↑/↓ PgUp/PgDn scroll  ·  Esc, Enter or q to go back")
+		return title + "\n\n" + m.helpView.View() + "\n" + footer
 	}
 	status := "● online"
 	if !m.connected {
