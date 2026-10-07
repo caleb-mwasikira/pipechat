@@ -14,7 +14,10 @@ import (
 //
 //   - a group you own that has no key yet: create it here and report its id;
 //   - a member waiting for a group you hold: seal its invite code to their public key;
-//   - a key sealed to you: open it, join the group, and confirm.
+//   - a key sealed to you: open it, join the group, and confirm;
+//   - when the server holds group keys (it says so with a public key), give it a copy of
+//     each group key you have, sealed so only the server can open it. New members then
+//     get their key from the server at once, without another member being online.
 
 const syncEvery = 15 * time.Second
 
@@ -92,6 +95,20 @@ func (m *Model) handleSync(result syncResult) {
 		m.server.enqueue(func() { m.server.SyncGrant(webGroup, handle, sealed) })
 	}
 
+	if result.sync.ServerKey != "" {
+		serverKey, err := crypto.ParsePublicKey(result.sync.ServerKey)
+		for _, item := range result.sync.NeedEscrow {
+			group := m.groupByGID(item.GID)
+			if err != nil || group == nil || !once(fmt.Sprintf("escrow/%d", item.Group)) {
+				continue
+			}
+			if sealed, err := crypto.SealAnon(serverKey, group.secret); err == nil {
+				webGroup := item.Group
+				m.server.enqueue(func() { m.server.SyncEscrow(webGroup, sealed) })
+			}
+		}
+	}
+
 	for _, item := range result.sync.Incoming {
 		if !once(fmt.Sprintf("incoming/%d", item.Group)) {
 			continue
@@ -118,7 +135,11 @@ func (m *Model) handleSync(result syncResult) {
 		m.addGroup(secret, true)
 		added := m.groups[len(m.groups)-1]
 		added.webID, added.webGrant = item.Group, true
-		m.notice(m.groups[0], "You were added to the group "+secret.Name+" by @"+item.From+".")
+		if item.FromKey == result.sync.ServerKey && result.sync.ServerKey != "" {
+			m.notice(m.groups[0], "You were added to the group "+secret.Name+".")
+		} else {
+			m.notice(m.groups[0], "You were added to the group "+secret.Name+" by @"+item.From+".")
+		}
 	}
 	m.refresh()
 }

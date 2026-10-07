@@ -61,7 +61,7 @@ func testDatabase(t *testing.T) string {
 // The website's tables, as its Laravel migrations make them (only the columns the server uses).
 const websiteSchema = `
 CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
-CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE);
+CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
@@ -534,5 +534,54 @@ func TestWebsiteGroups(t *testing.T) {
 	call(t, "PUT", base+"/api/identity", bob, identityRequest{PubKey: strings.Repeat("0b", 32), Vault: []byte("fresh")}, nil)
 	if got := sync(alice).Grant; len(got) != 1 {
 		t.Fatalf("after new keys alice should share again: %+v", got)
+	}
+}
+
+func TestEscrowHandsKeysOverWithoutAMemberOnline(t *testing.T) {
+	base := useServer(t)
+	Config.EscrowKey = bytes.Repeat([]byte{9}, 32)
+	alice := registerUser(t, base, "alice")
+	bob := registerUser(t, base, "bob")
+	var aliceID, bobID, group int64
+	Pool.QueryRow(`SELECT id FROM users WHERE handle = 'alice'`).Scan(&aliceID)
+	Pool.QueryRow(`SELECT id FROM users WHERE handle = 'bob'`).Scan(&bobID)
+
+	secret, _ := crypto.NewSecret("crew")
+	Pool.QueryRow(`INSERT INTO chat_groups (name, owner_id, gid) VALUES ('crew', $1, $2) RETURNING id`, aliceID, secret.GIDHex()).Scan(&group)
+	Pool.Exec(`INSERT INTO chat_group_members (group_id, user_id, delivered) VALUES ($1, $2, true)`, group, aliceID)
+	call(t, "POST", base+"/api/groups", alice, createGroupRequest{GID: secret.GIDHex(), Tok: secret.JoinToken()}, nil)
+
+	var sync database.Sync
+	call(t, "GET", base+"/api/sync", alice, nil, &sync)
+	serverKey, err := crypto.ParsePublicKey(sync.ServerKey)
+	if err != nil || len(sync.NeedEscrow) != 1 {
+		t.Fatalf("alice should be asked for the key: %+v", sync)
+	}
+
+	// A key for another group, or from a non-member, is refused.
+	other, _ := crypto.NewSecret("other")
+	wrong, _ := crypto.SealAnon(serverKey, other)
+	if status := call(t, "POST", base+"/api/sync/escrow", alice, escrowRequest{Group: group, Sealed: wrong}, nil); status != http.StatusBadRequest {
+		t.Fatalf("wrong group key: %d", status)
+	}
+	sealed, _ := crypto.SealAnon(serverKey, secret)
+	if status := call(t, "POST", base+"/api/sync/escrow", bob, escrowRequest{Group: group, Sealed: sealed}, nil); status != http.StatusConflict {
+		t.Fatalf("non-member: %d", status)
+	}
+	if status := call(t, "POST", base+"/api/sync/escrow", alice, escrowRequest{Group: group, Sealed: sealed}, nil); status != http.StatusNoContent {
+		t.Fatalf("escrow: %d", status)
+	}
+	sync = database.Sync{}
+	call(t, "GET", base+"/api/sync", alice, nil, &sync)
+	if len(sync.NeedEscrow) != 0 {
+		t.Fatalf("already held: %+v", sync.NeedEscrow)
+	}
+
+	// Bob joins with no other member online; his own sync carries the key, sealed to him.
+	Pool.Exec(`INSERT INTO chat_group_members (group_id, user_id) VALUES ($1, $2)`, group, bobID)
+	sync = database.Sync{}
+	call(t, "GET", base+"/api/sync", bob, nil, &sync)
+	if len(sync.Incoming) != 1 || sync.Incoming[0].FromKey != sync.ServerKey {
+		t.Fatalf("bob should get the key from the server: %+v", sync.Incoming)
 	}
 }

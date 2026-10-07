@@ -287,6 +287,11 @@ func (s *Server) InviteByEmail(email string, code string) error {
 
 // What the website wants this terminal to do about its groups.
 type SyncResult struct {
+	ServerKey  string `json:"server_key"` // the server's public key, when it holds group keys
+	NeedEscrow []struct {
+		Group int64  `json:"group"`
+		GID   string `json:"gid"`
+	} `json:"need_escrow"` // groups whose key the server should be given a copy of
 	Create []struct {
 		ID   int64  `json:"id"`
 		Name string `json:"name"`
@@ -322,4 +327,9 @@ func (s *Server) SyncGrant(webGroup int64, handle string, sealed []byte) error {
 
 func (s *Server) SyncGrantReceived(webGroup int64) error {
 	return s.call("DELETE", "/api/sync/grants/"+strconv.FormatInt(webGroup, 10), nil, nil)
+}
+
+// SyncEscrow gives the server a copy of a group's key, sealed so only the server can open it.
+func (s *Server) SyncEscrow(webGroup int64, sealed []byte) error {
+	return s.call("POST", "/api/sync/escrow", map[string]any{"group": webGroup, "sealed": sealed}, nil)
 }

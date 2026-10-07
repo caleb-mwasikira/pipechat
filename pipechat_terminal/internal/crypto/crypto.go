@@ -276,3 +276,39 @@ func grantKey(own *ecdh.PrivateKey, other *ecdh.PublicKey) ([]byte, error) {
 	}
 	return hkdf.Key(sha256.New, shared, nil, "termchat/grant/key", 32)
 }
+
+// SealAnon seals a group's invite code to a public key without revealing who sealed it:
+// a fresh one-time key pair is made for each call and its public half goes in front of
+// the sealed bytes. The server uses it to hold groups' keys for instant invitations.
+func SealAnon(recipient *ecdh.PublicKey, secret *Secret) ([]byte, error) {
+	temporary, err := NewIdentity()
+	if err != nil {
+		return nil, err
+	}
+	sealed, err := SealFor(temporary, recipient, secret)
+	if err != nil {
+		return nil, err
+	}
+	return append(temporary.PublicKey().Bytes(), sealed...), nil
+}
+
+// OpenAnon opens what SealAnon made.
+func OpenAnon(own *ecdh.PrivateKey, blob []byte) (*Secret, error) {
+	if len(blob) <= 32 {
+		return nil, errors.New("sealed key too short")
+	}
+	sender, err := ecdh.X25519().NewPublicKey(blob[:32])
+	if err != nil {
+		return nil, err
+	}
+	return OpenFrom(own, sender, blob[32:])
+}
+
+// EscrowIdentity derives the chat server's own key pair from its secret.
+func EscrowIdentity(secret []byte) (*ecdh.PrivateKey, error) {
+	raw, err := hkdf.Key(sha256.New, secret, nil, "termchat/escrow/x25519", 32)
+	if err != nil {
+		return nil, err
+	}
+	return ecdh.X25519().NewPrivateKey(raw)
+}

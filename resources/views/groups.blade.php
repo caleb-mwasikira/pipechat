@@ -13,7 +13,7 @@
         <h2 class="mb-3 font-mono text-xs font-bold uppercase tracking-wider text-cyber-neon">Invitations</h2>
         @foreach ($invites as $invite)
             <div class="flex flex-wrap items-center justify-between gap-3 border-t border-cyber-700 py-3 font-mono text-sm first:border-0">
-                <span class="text-gray-300"><span class="text-white">{{ $invite->name }}</span> &middot; from @{{ $invite->inviter }}</span>
+                <span class="text-gray-300"><span class="text-white">{{ $invite->name }}</span> &middot; from {{ '@'.$invite->inviter }}</span>
                 <span class="flex gap-2">
                     @foreach (['accept' => 'bg-cyber-neon text-black hover:bg-emerald-400', 'decline' => 'border border-cyber-600 text-gray-300 hover:border-red-400 hover:text-red-400'] as $answer => $class)
                         <form method="POST" action="{{ route('invites.respond', [$invite->id, $answer]) }}">@csrf

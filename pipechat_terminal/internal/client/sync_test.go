@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -22,7 +23,7 @@ import (
 
 const websiteSchema = `
 CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
-CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE);
+CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
@@ -68,7 +69,13 @@ func (term *terminal) sync() {
 	term.until("sync", func() bool { return !term.m.syncing })
 }
 
-func TestWebsiteGroupReachesTheTerminal(t *testing.T) {
+// Without escrow the key passes from member to member, so the inviter's terminal must be online.
+func TestWebsiteGroupReachesTheTerminal(t *testing.T) { websiteGroupFlow(t, false) }
+
+// With escrow the server hands the key over, so the new member gets in with nobody else online.
+func TestWebsiteGroupWithEscrowNeedsNoOneOnline(t *testing.T) { websiteGroupFlow(t, true) }
+
+func websiteGroupFlow(t *testing.T, escrow bool) {
 	base := os.Getenv("CHAT_TEST_DATABASE_URL")
 	if base == "" {
 		t.Skip("set CHAT_TEST_DATABASE_URL to a PostgreSQL URL to run this test")
@@ -92,7 +99,11 @@ func TestWebsiteGroupReachesTheTerminal(t *testing.T) {
 	if _, err := pool.Exec(websiteSchema); err != nil {
 		t.Fatal(err)
 	}
-	handlers.Pool, handlers.Config = pool, &config.Config{FilesDir: t.TempDir(), MaxUploadBytes: 1000, FileDays: 7}
+	settings := &config.Config{FilesDir: t.TempDir(), MaxUploadBytes: 1000, FileDays: 7}
+	if escrow {
+		settings.EscrowKey = bytes.Repeat([]byte{7}, 32)
+	}
+	handlers.Pool, handlers.Config = pool, settings
 	server := httptest.NewServer(handlers.Routes())
 	t.Cleanup(server.Close)
 
@@ -125,13 +136,29 @@ func TestWebsiteGroupReachesTheTerminal(t *testing.T) {
 		t.Fatalf("website group id %v, terminal %s", gid, alice.m.groups[1].secret.GIDHex())
 	}
 
-	// Bob accepts the invitation on the website; nothing happens until alice's terminal syncs.
+	if escrow {
+		// Alice's terminal gives the server a copy of the key on its next check-in.
+		held := false
+		for i := 0; i < 100 && !held; i++ {
+			alice.m.syncBusy = nil
+			alice.sync()
+			pool.QueryRow(`SELECT escrow IS NOT NULL FROM chat_groups WHERE id = $1`, group).Scan(&held)
+			alice.until("a moment", func() bool { time.Sleep(20 * time.Millisecond); return true })
+		}
+		if !held {
+			t.Fatal("the server never got a copy of the key")
+		}
+	}
+
+	// Bob accepts the invitation on the website; nothing happens until a terminal syncs.
 	pool.Exec(`INSERT INTO chat_group_members (group_id, user_id) VALUES ($1, $2)`, group, ids["bob"])
 	bob.sync()
 	if len(bob.m.groups) != 1 {
 		t.Fatal("bob got a group without a key")
 	}
-	alice.sync()
+	if !escrow {
+		alice.sync() // the key comes from alice's terminal
+	}
 	waitFor := func(what string, term *terminal, done func() bool) {
 		term.until(what, func() bool {
 			if !done() {

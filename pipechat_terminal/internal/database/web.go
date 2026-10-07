@@ -106,10 +106,26 @@ type Incoming struct {
 	Sealed  []byte `json:"sealed"`
 }
 
+// EscrowedGroup is a group this user waits for, whose key the server holds.
+type EscrowedGroup struct {
+	Group  int64
+	Name   string
+	Escrow []byte
+}
+
+// MissingEscrow is a group this user has the key to, which the server does not yet hold.
+type MissingEscrow struct {
+	Group int64  `json:"group"`
+	GID   string `json:"gid"`
+}
+
 type Sync struct {
-	Create   []NewGroup `json:"create"`   // groups this user owns that still need creating
-	Grant    []ToGrant  `json:"grant"`    // members of this user's groups waiting for the key
-	Incoming []Incoming `json:"incoming"` // keys sent to this user
+	ServerKey  string          `json:"server_key,omitempty"` // the server's public key, when it holds group keys
+	NeedEscrow []MissingEscrow `json:"need_escrow"`          // groups the terminal should upload the key of
+	Escrowed   []EscrowedGroup `json:"-"`
+	Create     []NewGroup      `json:"create"`   // groups this user owns that still need creating
+	Grant      []ToGrant       `json:"grant"`    // members of this user's groups waiting for the key
+	Incoming   []Incoming      `json:"incoming"` // keys sent to this user
 }
 
 func rowsOf[T any](rows *sql.Rows, err error, scan func(*sql.Rows) (T, error)) ([]T, error) {
@@ -165,7 +181,51 @@ func GetSync(ctx context.Context, pool *sql.DB, userID int64) (*Sync, error) {
 			return
 		})
 	}()
+	if err != nil {
+		return nil, err
+	}
+	out.NeedEscrow, err = func() ([]MissingEscrow, error) {
+		rows, err := pool.QueryContext(ctx, `
+			SELECT g.id, g.gid FROM chat_groups g
+			JOIN chat_group_members me ON me.group_id = g.id AND me.user_id = $1 AND me.delivered
+			WHERE g.gid IS NOT NULL AND g.escrow IS NULL`, userID)
+		return rowsOf(rows, err, func(r *sql.Rows) (g MissingEscrow, err error) { err = r.Scan(&g.Group, &g.GID); return })
+	}()
+	if err != nil {
+		return nil, err
+	}
+	out.Escrowed, err = func() ([]EscrowedGroup, error) {
+		rows, err := pool.QueryContext(ctx, `
+			SELECT g.id, g.name, g.escrow FROM chat_groups g
+			JOIN chat_group_members me ON me.group_id = g.id AND me.user_id = $1 AND NOT me.delivered
+			WHERE g.escrow IS NOT NULL`, userID)
+		return rowsOf(rows, err, func(r *sql.Rows) (g EscrowedGroup, err error) { err = r.Scan(&g.Group, &g.Name, &g.Escrow); return })
+	}()
 	return &out, err
+}
+
+// SetEscrow stores the server-sealed key of a group, if it has none yet and the sender is a member who has the key.
+func SetEscrow(ctx context.Context, pool *sql.DB, userID int64, group int64, gid string, sealed []byte) (bool, error) {
+	result, err := pool.ExecContext(ctx, `
+		UPDATE chat_groups SET escrow = $1
+		WHERE id = $2 AND gid = $3 AND escrow IS NULL
+		  AND EXISTS (SELECT 1 FROM chat_group_members me WHERE me.group_id = $2 AND me.user_id = $4 AND me.delivered)`,
+		sealed, group, gid, userID)
+	if err != nil {
+		return false, err
+	}
+	rows, _ := result.RowsAffected()
+	return rows == 1, nil
+}
+
+// GroupGID returns a website group's chat id, or "" when it has none yet.
+func GroupGID(ctx context.Context, pool *sql.DB, group int64) (string, error) {
+	var gid sql.NullString
+	err := pool.QueryRowContext(ctx, `SELECT gid FROM chat_groups WHERE id = $1`, group).Scan(&gid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return gid.String, err
 }
 
 // SetGroupGID records the chat group id the owner's terminal made for a website group.

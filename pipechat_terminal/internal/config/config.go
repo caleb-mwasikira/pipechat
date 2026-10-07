@@ -5,6 +5,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -18,8 +19,11 @@ type Config struct {
 	Host        string // address to listen on; empty means all addresses
 	Port        string
 	DatabaseURL string // PostgreSQL connection URL
-	TLSCert     string
-	TLSKey      string
+	// EscrowKey (CHAT_ESCROW_KEY, 64 hex characters) lets the server hold website groups' keys so
+	// invitees get in at once. Empty turns that off: keys then pass from member to member.
+	EscrowKey []byte
+	TLSCert   string
+	TLSKey    string
 
 	// Encrypted files shared in chats are kept in FilesDir until they are FileDays old.
 	FilesDir       string
@@ -47,7 +51,13 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CHAT_FILE_DAYS must be a whole number of days, 1 or more")
 	}
 
+	escrow, err := hex.DecodeString(get("CHAT_ESCROW_KEY", ""))
+	if err != nil || (len(escrow) != 0 && len(escrow) != 32) {
+		return nil, fmt.Errorf("CHAT_ESCROW_KEY must be 64 hex characters (make one with: openssl rand -hex 32)")
+	}
+
 	settings := &Config{
+		EscrowKey:      escrow,
 		FilesDir:       get("CHAT_FILES_DIR", "data/files"),
 		MaxUploadBytes: int64(maxUploadMB) << 20,
 		FileDays:       fileDays,
