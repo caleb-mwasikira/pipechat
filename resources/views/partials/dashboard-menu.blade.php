@@ -16,8 +16,7 @@
     @if ($user->is_admin)
         <p class="{{ $label }} text-cyber-purple"><i class="fa-solid fa-user-shield mr-1"></i>Admin</p>
         <a href="{{ route('admin') }}" class="{{ $item(request()->routeIs('admin')) }}"><i class="fa-solid fa-chart-line w-4 text-center"></i>Stats</a>
-        <a href="{{ route('admin.binaries') }}" class="{{ $item(request()->routeIs('admin.binaries')) }}"><i class="fa-solid fa-box-archive w-4 text-center"></i>Binaries</a>
-        <a href="{{ route('admin.binaries.create') }}" class="{{ $item(request()->routeIs('admin.binaries.create')) }}"><i class="fa-solid fa-upload w-4 text-center"></i>Upload binary</a>
+        <a href="{{ route('admin.binaries') }}" class="{{ $item(request()->routeIs('admin.binaries', 'admin.binaries.create')) }}"><i class="fa-solid fa-box-archive w-4 text-center"></i>Binaries</a>
     @endif
 
     <form method="POST" action="{{ route('logout') }}" class="mt-3 border-t border-cyber-700 pt-2">
