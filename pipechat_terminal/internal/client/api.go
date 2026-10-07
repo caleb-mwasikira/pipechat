@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -36,18 +37,30 @@ type Server struct {
 	sessionSet chan struct{} // signalled when a session starts, to open the WebSocket
 }
 
-// ParseServerURL checks what the user typed. "host:7777" means http://host:7777.
+// ParseServerURL checks what the user typed. With no http:// or https://, a plain
+// domain name such as "chat.example.com" means https://, because the login sends a
+// password; an address with a port ("host:7777"), an IP address or localhost means
+// http://, as that is how a server run by hand answers.
 func ParseServerURL(address string) (string, error) {
 	address = strings.TrimSpace(address)
 	if !strings.Contains(address, "://") {
-		address = "http://" + address
+		scheme := "http"
+		if host, err := url.Parse("//" + address); err == nil && host.Port() == "" && isDomainName(host.Hostname()) {
+			scheme = "https"
+		}
+		address = scheme + "://" + address
 	}
 	address = strings.TrimRight(address, "/")
 	parsed, err := url.Parse(address)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.Path != "" {
-		return "", errors.New("that is not a server address; try https://chat.example.com or 192.168.1.5:7777")
+		return "", errors.New("that is not a server address; try chat.example.com or 192.168.1.5:7777")
 	}
 	return address, nil
+}
+
+// isDomainName is true for names like "chat.example.com", false for "localhost" and IP addresses.
+func isDomainName(host string) bool {
+	return strings.Contains(host, ".") && net.ParseIP(host) == nil
 }
 
 // NewServer makes a Server for an address that ParseServerURL accepted.

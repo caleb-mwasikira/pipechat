@@ -184,7 +184,7 @@ func NewModel(store *Store, address string) *Model {
 	}
 	m := &Model{
 		store:         store,
-		connectInput:  newInput("/connect https://chat.example.com", false),
+		connectInput:  newInput("/connect pipechat.kibandaskimart.com", false),
 		emailInput:    newInput("email you registered with", false),
 		passwordInput: newInput("password", true),
 		input:         newInput("message or /command", false),
@@ -1363,7 +1363,7 @@ func (m *Model) connectView() string {
 		titleStyle.Render("Connect to a chat server"),
 		"",
 		"Type /connect followed by the server's address, for example:",
-		dimStyle.Render("  /connect https://chat.example.com"),
+		dimStyle.Render("  /connect pipechat.kibandaskimart.com"),
 		dimStyle.Render("  /connect 192.168.1.5:7777"),
 		"",
 		m.connectInput.View(),

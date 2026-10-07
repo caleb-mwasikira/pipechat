@@ -31,3 +31,4 @@ Thumbs.db
 /pipechat_terminal/data/
 /pipechat_terminal/*.log
 /pipechat_terminal/.env
+/dist/
