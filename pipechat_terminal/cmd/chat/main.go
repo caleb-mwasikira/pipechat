@@ -51,8 +51,8 @@ func main() {
 	// 3. Screen.
 	screen := client.NewModel(store, *serverURL)
 	options := []tea.ProgramOption{tea.WithAltScreen()}
-	if !store.MouseOff {
-		options = append(options, tea.WithMouseCellMotion()) // the mouse wheel scrolls (/mouse off turns it off)
+	if store.MouseOn {
+		options = append(options, tea.WithMouseCellMotion()) // the mouse wheel scrolls (/mouse on); otherwise text can be selected and copied
 	}
 	program := tea.NewProgram(screen, options...)
 

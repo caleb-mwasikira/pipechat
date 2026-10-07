@@ -41,6 +41,7 @@ var helpSections = []helpSection{
 	{"Files", []helpItem{
 		{"/upload PATH [-name SHORT]", "send a file or folder, encrypted, to this chat; the folder is listed as you type, and you confirm before it goes"},
 		{"/download SHORT|LINK [DIR]", "save a shared file"},
+		{"/open HASH|NAME|NUMBER", "download a shared file and open it with your computer's program for it (programs are saved, never started)"},
 		{"/files", "list files shared with you"},
 		{"/link SHORT", "show a file's download link (it holds the key)"},
 		{"/share SHORT", "post a file you already have to this chat"},
@@ -60,12 +61,13 @@ var helpSections = []helpSection{
 		{"/search -in CHAT TEXT", "only in one chat (quote a name with spaces)"},
 	}},
 	{"Your computer", []helpItem{
-		{"!COMMAND · /sh COMMAND", "run a shell command here and see what it prints (e.g. !ls -l); nothing is sent to the chat"},
-		{"!cd FOLDER", "change folder, so /upload and /download paths can be short"},
+		{"/sh COMMAND", "run one shell command here and see what it prints (e.g. /sh ls -l); nothing is sent to the chat"},
+		{"/shell · Ctrl+O", "open a full-screen shell: every line runs as a command, Tab completes names, clear or Ctrl+L clears the screen, and its text can be selected and copied; exit or Ctrl+O goes back"},
+		{"cd FOLDER", "in the shell (or /sh cd FOLDER): change folder, so /upload and /download paths can be short"},
 	}},
 	{"Screen", []helpItem{
 		{"/clear", "clear this chat's messages from view"},
-		{"/mouse [on|off]", "the wheel scrolls the chat (on), or text can be selected freely (off)"},
+		{"/mouse [on|off]", "off (the default): select and copy text anywhere; on: the wheel scrolls the chat, and Shift+drag selects"},
 		{"/help", "show this guide"},
 		{"/update", "check for a newer version and offer to install it"},
 		{"/exit", "quit (/quit works too)"},
@@ -76,7 +78,7 @@ var helpKeys = []helpItem{
 	{"Tab", "finish the command you are typing (grey text); also next group"},
 	{"Tab · Ctrl+N", "next group"},
 	{"Shift+Tab · Ctrl+P", "previous group"},
-	{"PgUp · PgDn · ↑ · ↓", "scroll the messages (the mouse wheel works too)"},
+	{"PgUp · PgDn · ↑ · ↓", "scroll the messages (the wheel too, in most terminals)"},
 	{"Esc", "jump to the newest message"},
 	{"/ · n · N", "in a page (this guide, /music, /files): search it like vim, then next and previous match"},
 	{"Ctrl+C", "quit"},

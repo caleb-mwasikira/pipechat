@@ -131,7 +131,8 @@ func TestAWholeStreamLeavesACopyForNextTime(t *testing.T) {
 }
 
 func TestOnlyACompleteCorrectStreamIsKept(t *testing.T) {
-	song := bytes.Repeat([]byte("0123456789"), 5000)
+	// Big enough that the server cannot hand it all to the network buffers before the player hangs up.
+	song := bytes.Repeat([]byte("0123456789"), 1<<20)
 
 	// A player that asks for a piece (seeking) does not make a copy.
 	proxy, track := cacheServer(t, song)

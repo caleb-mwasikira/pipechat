@@ -12,6 +12,10 @@ import (
 
 // refreshSuggestions sets what the input can suggest: the commands, and the closed chats by name.
 func (m *Model) refreshSuggestions() {
+	if m.shellMode {
+		m.input.SetSuggestions(nil) // the line is a shell command: nothing of ours to complete
+		return
+	}
 	suggestions := append([]string(nil), complete.Commands...)
 	for _, chat := range m.vault.Closed {
 		suggestions = append(suggestions, "/reopen "+chat.Name)

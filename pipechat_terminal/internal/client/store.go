@@ -16,7 +16,7 @@ import (
 type Store struct {
 	path           string
 	ServerURL      string       `json:"server_url"`      // the chat server connected to last time
-	MouseOff       bool         `json:"mouse_off"`       // the person turned the mouse wheel off, to select text freely
+	MouseOn        bool         `json:"mouse_on"`        // the person turned the mouse wheel on (/mouse on); by default the terminal keeps the mouse, so text can be copied
 	SkippedVersion string       `json:"skipped_version"` // an update the person said no to for good
 	LastEmail      string       `json:"last_email"`      // pre-fills the login screen
 	History        *history.Log `json:"-"`               // the messages shown in each chat, kept between runs (history.jsonl)

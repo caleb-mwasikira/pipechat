@@ -192,14 +192,20 @@ type Model struct {
 	askedInfo     *Server         // the server already asked where to register
 	website       string          // where to register, as the server says; empty means the server's own address
 	newBelow      int             // messages that arrived while the chat was scrolled up
-	mouseWanted   bool            // the person wants the mouse wheel to scroll the chat (/mouse); off lets them select text everywhere
+	mouseWanted   bool            // the person wants the mouse wheel to scroll the chat (/mouse on); off (the default) lets them select text everywhere
 	mouseCaptured bool            // what the terminal was last told: true while the program has the mouse
 	pageFind      pageSearch      // searching inside the page that is open, as in vim
 	pageBase      string          // the open page as it was drawn, without search marks
 	progress      *files.Progress // how far the upload or download has got
-	pathMode      bool            // the input holds /upload or /download, whose suggestions are file names
-	pageFooter    string          // what the bottom line of a page says; empty for the usual
-	pendingSend   *pendingUpload  // an upload waiting for a yes on its preview page
+	opening       bool            // the download in progress is for /open: open the file when it arrives
+	shellScreen   viewport.Model  // the shell screen's record of what was run
+	shellLog      []string
+	shellHistory  []string
+	shellAt       int            // where in shellHistory the arrow keys are
+	shellMode     bool           // the input runs shell commands instead of sending messages
+	pathMode      bool           // the input holds /upload or /download, whose suggestions are file names
+	pageFooter    string         // what the bottom line of a page says; empty for the usual
+	pendingSend   *pendingUpload // an upload waiting for a yes on its preview page
 	pageContent   func(width int) string
 	helpView      viewport.Model
 	syncBusy      map[string]time.Time // website group work already under way, and since when
@@ -237,13 +243,13 @@ func NewModel(store *Store, address string) *Model {
 		handleInput:   newInput("a-z, 0-9, _ (3-20)", false),
 		confirmInput:  newInput("the same password again", true),
 		codeInput:     newInput("the code from the email", false),
-		input:         newInput("message or /command", false),
+		input:         newInput(chatPlaceholder, false),
 		viewport:      viewport.New(10, 5),
 		groups:        []*groupState{{}},
 	}
 	m.handleInput.CharLimit, m.nameInput.CharLimit, m.codeInput.CharLimit = 20, 100, 24
-	m.mouseWanted = !store.MouseOff
-	m.mouseCaptured = m.mouseWanted // main starts the program with the mouse on unless the person turned it off
+	m.mouseWanted = store.MouseOn
+	m.mouseCaptured = m.mouseWanted // main starts the program with the mouse on only if the person turned it on
 	m.connectInput.Focus()
 	m.input.ShowSuggestions = true
 	m.input.CompletionStyle = ui.Dim
@@ -313,6 +319,23 @@ func (m *Model) Init() tea.Cmd { return tea.Batch(textinput.Blink, syncTicks()) 
 
 // Event is how background goroutines (the link) reach the screen.
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	model, command := m.update(message)
+	if want := m.mouseNow(); want != m.mouseCaptured {
+		command = tea.Batch(command, m.setMouse(want))
+	}
+	return model, command
+}
+
+// mouseNow says whether the mouse should belong to the program right now. Where there is text worth copying
+// (the pages and the shell) it is always let go, and in the chats it is let go unless /mouse on, so the terminal can select it.
+func (m *Model) mouseNow() bool {
+	if m.showHelp || m.shellMode {
+		return false
+	}
+	return m.mouseWanted
+}
+
+func (m *Model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = message.Width, message.Height
@@ -323,6 +346,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showHelp {
 			m.renderPage()
 		}
+		m.layoutShell()
 		m.refresh()
 		return m, nil
 
@@ -416,6 +440,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy, m.transfer, m.progress = false, "", nil
 		m.layout()
 		current := m.groups[m.current]
+		if m.opening {
+			m.opening = false
+			if message.Err != nil {
+				m.notice(current, "could not download "+message.Name+": "+message.Err.Error())
+				return m, nil
+			}
+			return m, m.openDownloaded(current, message.Name, message.Dir, message.Entries)
+		}
 		if message.Err != nil {
 			m.notice(current, "download failed: "+message.Err.Error())
 		} else {
@@ -1207,6 +1239,9 @@ func (m *Model) send(g *groupState, content payload) error {
 // ---- chat screen ----
 
 func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.shellMode {
+		return m.shellKey(key)
+	}
 	if m.showHelp {
 		if m.pendingUpdate != nil {
 			if command, handled := m.answerUpdate(key.String()); handled {
@@ -1240,6 +1275,8 @@ func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, command
 	}
 	switch key.String() {
+	case "ctrl+o":
+		return m, m.setShellMode(true)
 	case "tab", "ctrl+n":
 		if key.String() == "tab" && m.suggestionShown() {
 			break // Tab finishes the command being typed
@@ -1344,6 +1381,12 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		}
 		m.refresh()
 
+	case "/shell":
+		return m.setShellMode(true)
+
+	case "/chat":
+		return m.setShellMode(false)
+
 	case "/create":
 		m.createCommand(current, argument)
 
@@ -1436,6 +1479,9 @@ func (m *Model) runCommand(text string) tea.Cmd {
 
 	case "/download":
 		return m.startDownload(current, argument)
+
+	case "/open":
+		return m.startOpen(current, argument)
 
 	case "/files":
 		return m.showShared()
@@ -1647,6 +1693,9 @@ func (m *Model) View() string {
 		return m.connectView()
 	case m.session == nil:
 		return m.authView()
+	}
+	if m.shellMode {
+		return m.shellView()
 	}
 	if m.showHelp {
 		title := ui.Title.Render("Pipechat") + ui.Dim.Render("  "+m.pageTitle)
@@ -1999,12 +2048,12 @@ func (m *Model) mouseCommand(current *groupState, argument string) tea.Cmd {
 		m.notice(current, "usage: /mouse on|off")
 		return nil
 	}
-	m.store.MouseOff = !m.mouseWanted
+	m.store.MouseOn = m.mouseWanted
 	m.store.Save()
 	if m.mouseWanted {
-		m.notice(current, "mouse on: the wheel scrolls the chat. To select text, hold Shift while dragging.")
+		m.notice(current, "mouse on: the wheel scrolls the chat, but to select text you must hold Shift while dragging. /mouse off lets you select freely.")
 	} else {
-		m.notice(current, "mouse off: select and copy text freely. Scroll with the arrow keys or PgUp/PgDn; /mouse on brings the wheel back.")
+		m.notice(current, "mouse off: select and copy text freely, here and in every chat. Scroll with the arrow keys or PgUp/PgDn; /mouse on brings the wheel back.")
 	}
 	return m.setMouse(m.mouseWanted)
 }

@@ -7,11 +7,25 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pipechat/internal/client/ui"
+	"pipechat/internal/crypto"
 )
+
+// inARealChat moves the model off the welcome page, which always leaves the mouse to the terminal.
+func inARealChat(t *testing.T, m *Model) {
+	secret, err := crypto.NewSecret("crew")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.groups = append(m.groups, &groupState{secret: secret})
+	m.switchTo(len(m.groups) - 1)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+}
 
 func TestPagesLetGoOfTheMouseSoTextCanBeCopied(t *testing.T) {
 	m := loggedInModel(t)
-	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	inARealChat(t, m)
+	m.input.SetValue("/mouse on")
+	m.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
 	if !m.mouseCaptured || !m.mouseWanted {
 		t.Fatal("the chat starts with the mouse wheel on")
 	}
@@ -43,12 +57,17 @@ func TestPagesLetGoOfTheMouseSoTextCanBeCopied(t *testing.T) {
 
 func TestMouseCommandAndTheChoiceIsRemembered(t *testing.T) {
 	m := loggedInModel(t)
-	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	inARealChat(t, m)
+	if m.mouseCaptured || m.mouseWanted || m.mouseNow() {
+		t.Fatal("chats and direct chats start with the mouse left to the terminal, so text can be copied")
+	}
 
+	m.input.SetValue("/mouse on")
+	m.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
 	m.input.SetValue("/mouse off")
 	m.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.mouseCaptured || m.mouseWanted || !m.store.MouseOff || !strings.Contains(entriesText(m.groups[0]), "select and copy text freely") {
-		t.Fatalf("mouse off: captured %v wanted %v remembered %v", m.mouseCaptured, m.mouseWanted, m.store.MouseOff)
+	if m.mouseCaptured || m.mouseWanted || m.store.MouseOn || !strings.Contains(entriesText(m.groups[m.current]), "select and copy text freely") {
+		t.Fatalf("mouse off: captured %v wanted %v remembered %v", m.mouseCaptured, m.mouseWanted, m.store.MouseOn)
 	}
 	// With it off, opening and closing a page must not turn it on again.
 	m.Update(musicList{})
@@ -60,7 +79,7 @@ func TestMouseCommandAndTheChoiceIsRemembered(t *testing.T) {
 	// It comes back with /mouse on, and with a bare /mouse it flips.
 	m.input.SetValue("/mouse on")
 	m.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.mouseCaptured || m.store.MouseOff || !strings.Contains(entriesText(m.groups[0]), "hold Shift") {
+	if !m.mouseCaptured || !m.store.MouseOn || !strings.Contains(entriesText(m.groups[m.current]), "must hold Shift") {
 		t.Fatal("mouse on")
 	}
 	m.input.SetValue("/mouse")
@@ -70,14 +89,14 @@ func TestMouseCommandAndTheChoiceIsRemembered(t *testing.T) {
 	}
 	m.input.SetValue("/mouse maybe")
 	m.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
-	if !strings.Contains(entriesText(m.groups[0]), "usage: /mouse on|off") {
+	if !strings.Contains(entriesText(m.groups[m.current]), "usage: /mouse on|off") {
 		t.Fatal("a mistake gets the usage")
 	}
 
 	// A new run starts the way the person left it.
 	again := NewModel(m.store, "")
-	if again.mouseWanted || again.mouseCaptured {
-		t.Fatal("the next run should start with the mouse off")
+	if again.mouseWanted != m.store.MouseOn || again.mouseCaptured != m.store.MouseOn {
+		t.Fatal("the next run should start the way the person left it")
 	}
 	if guide := ui.HelpGuide(100); !strings.Contains(guide, "/mouse [on|off]") {
 		t.Fatal("the help guide lists /mouse")
