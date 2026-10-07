@@ -315,6 +315,10 @@ func (s *Server) InviteByEmail(email string, code string) error {
 
 // What the website wants this terminal to do about its groups.
 type SyncResult struct {
+	Names []struct {
+		GID  string `json:"gid"`
+		Name string `json:"name"`
+	} `json:"names"` // what the website calls this person's groups now
 	ServerKey  string `json:"server_key"` // the server's public key, when it holds group keys
 	NeedEscrow []struct {
 		Group int64  `json:"group"`
@@ -437,6 +441,15 @@ func (s *Server) GetOpenGroup(name string) (OpenGroup, error) {
 	return group, err
 }
 
+// JoinWithCode redeems a short invite code made on the website. It returns the group's name.
+func (s *Server) JoinWithCode(code string) (string, error) {
+	var result struct {
+		Name string `json:"name"`
+	}
+	err := s.call("POST", "/api/join/code", map[string]any{"code": code}, &result)
+	return result.Name, err
+}
+
 // ListOpenGroup makes a group you are in public under a name.
 func (s *Server) ListOpenGroup(name string, code string) error {
 	return s.call("POST", "/api/open", map[string]any{"name": name, "code": code}, nil)
@@ -481,4 +494,19 @@ func (s *Server) Info() (website string, err error) {
 	}
 	err = s.call("GET", "/api/info", nil, &info)
 	return info.Website, err
+}
+
+// Register makes an account (the same one the website has). It does not log in.
+func (s *Server) Register(name string, handle string, email string, password string) error {
+	return s.call("POST", "/api/auth/register", map[string]any{"name": name, "handle": handle, "email": email, "password": password}, nil)
+}
+
+// ForgotPassword asks for a reset code to be emailed. The answer is the same whether or not the email has an account.
+func (s *Server) ForgotPassword(email string) error {
+	return s.call("POST", "/api/auth/forgot", map[string]any{"email": email}, nil)
+}
+
+// ResetPassword sets a new password with the code from the email.
+func (s *Server) ResetPassword(email string, code string, password string) error {
+	return s.call("POST", "/api/auth/reset", map[string]any{"email": email, "code": code, "password": password}, nil)
 }

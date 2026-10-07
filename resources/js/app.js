@@ -80,3 +80,38 @@ try {
 }
 
 setupMusicUpload();
+
+// Pop-ups opened by a button: data-open-dialog="id" opens the <dialog> with that id, and anything marked
+// data-close-dialog (or a click on the dimmed area) closes it.
+document.querySelectorAll('[data-open-dialog]').forEach((button) => {
+    button.addEventListener('click', () => document.getElementById(button.dataset.openDialog)?.showModal());
+});
+document.querySelectorAll('dialog').forEach((dialog) => {
+    dialog.querySelectorAll('[data-close-dialog]').forEach((button) => button.addEventListener('click', () => dialog.close()));
+    if (dialog.querySelector('[data-close-dialog]')) {
+        dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+    }
+});
+
+// A form marked data-autosubmit saves as soon as a switch in it is flipped.
+document.querySelectorAll('form[data-autosubmit]').forEach((form) => {
+    form.querySelectorAll('input[type="checkbox"]').forEach((box) => box.addEventListener('change', () => form.requestSubmit()));
+});
+
+// A button with data-copy="text" puts that text on the clipboard. The permission API needs a secure page, so
+// when it is not there the text in the box next to the button is selected and copied the old way.
+document.querySelectorAll('[data-copy]').forEach((button) => {
+    button.addEventListener('click', async () => {
+        const text = button.dataset.copy;
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch (error) {
+            const box = document.getElementById('invite-url') || Object.assign(document.createElement('textarea'), { value: text });
+            if (!box.isConnected) document.body.append(box);
+            box.select();
+            document.execCommand('copy');
+            if (!box.id) box.remove();
+        }
+        window.toast?.('Link copied. Paste it wherever you want to invite people.');
+    });
+});

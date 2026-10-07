@@ -186,3 +186,23 @@ body {
         max-width: calc(100vw - 2rem);
     }
 }
+
+/* ---- small animations in the home page pictures; still when the person asks for less motion ---- */
+@keyframes illus-dash {
+    to { stroke-dashoffset: -26; }
+}
+@keyframes illus-hop {
+    0%, 100% { transform: translate(222px, 120px); }
+    50% { transform: translate(222px, 108px); }
+}
+@keyframes illus-eq {
+    0%, 100% { transform: scaleY(0.25); }
+    50% { transform: scaleY(var(--s, 1)); }
+}
+.illus-flow { animation: illus-dash 1.2s linear infinite; }
+.illus-hop { animation: illus-hop 2.4s ease-in-out infinite; }
+.eq-bar { transform-box: fill-box; transform-origin: bottom; animation: illus-eq 1.1s ease-in-out infinite; animation-delay: var(--d, 0s); }
+
+@media (prefers-reduced-motion: reduce) {
+    .illus-flow, .illus-hop, .eq-bar { animation: none; }
+}

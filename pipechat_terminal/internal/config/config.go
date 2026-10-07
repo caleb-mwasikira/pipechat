@@ -73,11 +73,11 @@ func Load() (*Config, error) {
 		WebsiteURL:     websiteURL(get("CHAT_WEBSITE_URL", get("APP_URL", ""))),
 		TLSCert:        get("CHAT_TLS_CERT", ""),
 		TLSKey:         get("CHAT_TLS_KEY", ""),
-		SMTPHost:       get("SMTP_HOST", ""),
-		SMTPPort:       get("SMTP_PORT", "587"),
-		SMTPUsername:   get("SMTP_USERNAME", ""),
-		SMTPPassword:   get("SMTP_PASSWORD", ""),
-		SMTPFrom:       get("SMTP_FROM", ""),
+		SMTPHost:       get("SMTP_HOST", websiteMail("MAIL_HOST")),
+		SMTPPort:       get("SMTP_PORT", get("MAIL_PORT", "587")),
+		SMTPUsername:   get("SMTP_USERNAME", websiteMail("MAIL_USERNAME")),
+		SMTPPassword:   get("SMTP_PASSWORD", websiteMail("MAIL_PASSWORD")),
+		SMTPFrom:       get("SMTP_FROM", websiteMail("MAIL_FROM_ADDRESS")),
 	}
 	if (settings.TLSCert == "") != (settings.TLSKey == "") {
 		return nil, fmt.Errorf("CHAT_TLS_CERT and CHAT_TLS_KEY must be set together")
@@ -150,4 +150,17 @@ func websiteURL(raw string) string {
 		return "https://" + raw
 	}
 	return "http://" + raw
+}
+
+// websiteMail reads one of the website's mail settings, but only when the website really sends by SMTP: its
+// "log" mailer writes mails to a file, and its default host and sender are placeholders, not a mail server.
+func websiteMail(key string) string {
+	if os.Getenv("MAIL_MAILER") != "smtp" {
+		return ""
+	}
+	value := os.Getenv(key)
+	if value == "null" {
+		return ""
+	}
+	return value
 }

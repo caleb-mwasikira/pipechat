@@ -89,13 +89,13 @@ func (m *Model) answerUpdate(key string) (tea.Cmd, bool) {
 	case "n", "N", "esc", "q":
 		m.closePage()
 		m.notice(m.groups[m.current], "update to v"+release.Version+" skipped for now; /update brings it back")
-		return tea.ClearScreen, true
+		return m.pageClosed(), true
 	case "s", "S":
 		m.closePage()
 		m.store.SkippedVersion = release.Version
 		m.store.Save()
 		m.notice(m.groups[m.current], "v"+release.Version+" will not be offered again; /update still installs it")
-		return tea.ClearScreen, true
+		return m.pageClosed(), true
 	}
 	return nil, false
 }
@@ -110,18 +110,18 @@ func (m *Model) startUpdate(release update.Release) tea.Cmd {
 	current := m.groups[m.current]
 	if m.busy {
 		m.notice(current, "another transfer is still running; try /update when it is done")
-		return tea.ClearScreen
+		return m.pageClosed()
 	}
 	exe, err := executable()
 	if err != nil {
 		m.notice(current, "cannot find the running program: "+err.Error())
-		return tea.ClearScreen
+		return m.pageClosed()
 	}
 	m.busy, m.transfer = true, "updating"
 	m.notice(current, "downloading v"+release.Version+"...")
 	server, name := m.server, "pipechat v"+release.Version
 	stage := update.StagePath(exe)
-	return tea.Batch(tea.ClearScreen, func() tea.Msg {
+	return tea.Batch(m.pageClosed(), func() tea.Msg {
 		var last time.Time
 		err := update.Download(context.Background(), server.URL(), release, stage, func(done, total int64) {
 			if time.Since(last) < 150*time.Millisecond && done != total {

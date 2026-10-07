@@ -65,7 +65,7 @@ func (m *Model) previewUpload(current *groupState, argument string) tea.Cmd {
 		return nil
 	}
 
-	where := current.secret.Name
+	where := current.name()
 	if current.direct {
 		where = "a private chat with @" + current.peer
 	} else if len(m.peersOnline[current.secret.GIDHex()]) > 0 {

@@ -2,12 +2,14 @@ package client
 
 import (
 	"fmt"
+	tea "github.com/charmbracelet/bubbletea"
 	"sort"
 	"strings"
 	"time"
 
 	"pipechat/internal/client/files"
 	"pipechat/internal/client/lookup"
+	"pipechat/internal/client/ui"
 )
 
 // The files shared in chats that this account knows about, listed with a number and an MD5 hash, so any of
@@ -55,22 +57,15 @@ func (m *Model) findShared(query string) (sharedFile, error) {
 	return list[index], nil
 }
 
-// showShared prints the list: number, hash, name, then the details.
-func (m *Model) showShared(current *groupState) {
-	list := m.sharedList()
-	if len(list) == 0 {
-		m.notice(current, "no shared files yet; use /upload PATH")
-		return
+// showShared opens the list as a page, like the help guide. Esc closes it.
+func (m *Model) showShared() tea.Cmd {
+	list := make([]ui.SharedFile, 0, len(m.vault.Files))
+	for _, file := range m.sharedList() {
+		list = append(list, ui.SharedFile{Number: file.Number, Name: file.Name, Hash: file.Hash, Size: file.Size, From: file.From, At: time.Unix(file.At, 0)})
 	}
-	m.notice(current, "Shared files. Get one with /download NAME, /download HASH (the start is enough) or /download NUMBER:")
-	for _, file := range list {
-		who := "you"
-		if file.From != "" {
-			who = "@" + file.From
-		}
-		m.notice(current, fmt.Sprintf("  #%-3d %s  %s  (%s, from %s, %s)", file.Number, lookup.Short(file.Hash), file.Name,
-			files.FormatSize(file.Size), who, time.Unix(file.At, 0).Format("2006-01-02 15:04")))
-	}
+	command := m.openPage("files", func(width int) string { return ui.SharedFiles(width, list) })
+	m.pageFooter = "↑/↓ scroll  ·  / search  ·  Esc back  ·  select text to copy  ·  then /download" // after openPage, which clears it
+	return command
 }
 
 // hashNote is " md5 9e107d9d" when a hash is known, for messages.

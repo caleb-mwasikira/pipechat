@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -113,3 +114,6 @@ func SweepSessions() {
 		live.mutex.Unlock()
 	}
 }
+
+// backgroundContext is for work that goes on after the answer was sent, when the request is already over.
+func backgroundContext() context.Context { return context.Background() }

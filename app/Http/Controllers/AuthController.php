@@ -26,7 +26,7 @@ class AuthController extends Controller
         SafeMail::to($user, new Welcome($user));
         $request->session()->regenerate();
 
-        return redirect()->route('download');
+        return redirect()->intended(route('download'));
     }
 
     public function login(Request $request): RedirectResponse

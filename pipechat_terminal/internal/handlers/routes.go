@@ -9,6 +9,9 @@ import (
 
 // Routes is the list of every URL of the chat server and the handler that answers it.
 //
+//	POST   /api/auth/register           make an account                        (accounts.go)
+//	POST   /api/auth/forgot             email a password reset code            (accounts.go)
+//	POST   /api/auth/reset              set a new password with that code      (accounts.go)
 //	POST   /api/auth/login              website email + password -> token, vault (auth.go)
 //	GET    /api/files/{id}              download an encrypted file            (files.go)
 //	GET    /api/info                    where to register                      (info.go)
@@ -37,6 +40,7 @@ import (
 //	POST   /api/open                    make your group public by name         (open.go)
 //	GET    /api/open[/{name}]           list public groups, or get one to join (open.go)
 //	DELETE /api/open/{name}             make it private again                  (open.go)
+//	POST   /api/join/code               join a website group with its short code (codes.go)
 //	GET    /api/music                   the music library                      (music.go)
 //	GET    /api/music/{id}/file         download a track (supports ranges)     (music.go)
 //	POST   /api/invitations             email a group's invite code to someone (invitations.go)
@@ -56,6 +60,9 @@ func Routes() http.Handler {
 
 	router.Route("/api", func(api chi.Router) {
 		api.Post("/auth/login", login)
+		api.Post("/auth/register", registerAccount)
+		api.Post("/auth/forgot", forgotPassword)
+		api.Post("/auth/reset", resetPassword)
 		api.Get("/files/{id}", downloadFile)
 		api.Get("/info", serverInfo)
 		api.Get("/version", latestVersion)
@@ -88,6 +95,7 @@ func Routes() http.Handler {
 			api.Get("/open", listOpenGroups)
 			api.Get("/open/{name}", getOpenGroup)
 			api.Delete("/open/{name}", unlistOpenGroup)
+			api.Post("/join/code", joinWithCode)
 			api.Get("/music", listMusic)
 			api.Get("/music/{id}/file", musicFile)
 			api.Post("/invitations", inviteByEmail)

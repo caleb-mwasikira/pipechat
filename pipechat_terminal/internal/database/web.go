@@ -127,7 +127,15 @@ type MissingEscrow struct {
 	GID   string `json:"gid"`
 }
 
+// GroupName is what the website calls one of this user's groups now. The creator can rename a group there,
+// and terminals use this to show the new name.
+type GroupName struct {
+	GID  string `json:"gid"`
+	Name string `json:"name"`
+}
+
 type Sync struct {
+	Names      []GroupName     `json:"names"`
 	ServerKey  string          `json:"server_key,omitempty"` // the server's public key, when it holds group keys
 	NeedEscrow []MissingEscrow `json:"need_escrow"`          // groups the terminal should upload the key of
 	Escrowed   []EscrowedGroup `json:"-"`
@@ -188,6 +196,16 @@ func GetSync(ctx context.Context, pool *sql.DB, userID int64) (*Sync, error) {
 			err = r.Scan(&g.Group, &g.Name, &g.From, &g.FromKey, &g.Sealed)
 			return
 		})
+	}()
+	if err != nil {
+		return nil, err
+	}
+	out.Names, err = func() ([]GroupName, error) {
+		rows, err := pool.QueryContext(ctx, `
+			SELECT g.gid, g.name FROM chat_groups g
+			JOIN chat_group_members me ON me.group_id = g.id AND me.user_id = $1
+			WHERE g.gid IS NOT NULL`, userID)
+		return rowsOf(rows, err, func(r *sql.Rows) (n GroupName, err error) { err = r.Scan(&n.GID, &n.Name); return })
 	}()
 	if err != nil {
 		return nil, err
@@ -259,7 +277,7 @@ func SetGroupGID(ctx context.Context, pool *sql.DB, userID int64, group int64, g
 func AddGrant(ctx context.Context, pool *sql.DB, fromUser int64, group int64, targetHandle string, sealed []byte) (bool, error) {
 	result, err := pool.ExecContext(ctx, `
 		INSERT INTO chat_group_grants (group_id, user_id, from_user_id, sealed, created_at)
-		SELECT m.group_id, m.user_id, $1, $4, now()
+		SELECT m.group_id, m.user_id, $1, $4, (now() AT TIME ZONE 'UTC')
 		FROM chat_group_members m
 		JOIN accounts a ON a.user_id = m.user_id AND a.handle = $3
 		WHERE m.group_id = $2 AND NOT m.delivered
@@ -370,7 +388,7 @@ func GetProfile(ctx context.Context, pool *sql.DB, handle string) (*Profile, err
 
 // SetBio saves a user's bio.
 func SetBio(ctx context.Context, pool *sql.DB, userID int64, bio string) error {
-	_, err := pool.ExecContext(ctx, `UPDATE users SET bio = NULLIF($1, ''), updated_at = now() WHERE id = $2`, bio, userID)
+	_, err := pool.ExecContext(ctx, `UPDATE users SET bio = NULLIF($1, ''), updated_at = (now() AT TIME ZONE 'UTC') WHERE id = $2`, bio, userID)
 	return err
 }
 
@@ -389,10 +407,10 @@ func SetPresence(ctx context.Context, pool *sql.DB, handle string, online bool) 
 func RecordShare(ctx context.Context, pool *sql.DB, userID int64, gid string, name string, size int64, hash string, expires time.Time) (bool, error) {
 	result, err := pool.ExecContext(ctx, `
 		INSERT INTO chat_group_files (group_id, user_id, name, size, md5, expires_at, created_at)
-		SELECT g.id, $1, $3, $4, NULLIF($5, ''), $6, now()
+		SELECT g.id, $1, $3, $4, NULLIF($5, ''), $6, (now() AT TIME ZONE 'UTC')
 		FROM chat_groups g
 		JOIN chat_group_members m ON m.group_id = g.id AND m.user_id = $1
-		WHERE g.gid = $2`, userID, gid, name, size, hash, expires)
+		WHERE g.gid = $2`, userID, gid, name, size, hash, expires.UTC())
 	if err != nil {
 		return false, err
 	}

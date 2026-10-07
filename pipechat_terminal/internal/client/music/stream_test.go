@@ -110,7 +110,12 @@ func TestAWholeStreamLeavesACopyForNextTime(t *testing.T) {
 	io.Copy(io.Discard, response.Body)
 	response.Body.Close()
 
+	// The copy is moved into place just after the last byte is sent.
 	path, ok := Cached(track)
+	for wait := 0; !ok && wait < 100; wait++ {
+		time.Sleep(10 * time.Millisecond)
+		path, ok = Cached(track)
+	}
 	if !ok {
 		t.Fatal("a song that was streamed whole should be kept")
 	}

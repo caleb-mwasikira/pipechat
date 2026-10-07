@@ -61,6 +61,7 @@ var helpSections = []helpSection{
 	}},
 	{"Screen", []helpItem{
 		{"/clear", "clear this chat's messages from view"},
+		{"/mouse [on|off]", "the wheel scrolls the chat (on), or text can be selected freely (off)"},
 		{"/help", "show this guide"},
 		{"/update", "check for a newer version and offer to install it"},
 		{"/exit", "quit (/quit works too)"},
@@ -71,7 +72,9 @@ var helpKeys = []helpItem{
 	{"Tab", "finish the command you are typing (grey text); also next group"},
 	{"Tab · Ctrl+N", "next group"},
 	{"Shift+Tab · Ctrl+P", "previous group"},
-	{"PgUp · PgDn", "scroll the messages"},
+	{"PgUp · PgDn · ↑ · ↓", "scroll the messages (the mouse wheel works too)"},
+	{"Esc", "jump to the newest message"},
+	{"/ · n · N", "in a page (this guide, /music, /files): search it like vim, then next and previous match"},
 	{"Ctrl+C", "quit"},
 }
 

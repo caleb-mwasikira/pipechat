@@ -23,7 +23,7 @@ func chatName(g *groupState) string {
 	if g.direct {
 		return "@" + g.peer
 	}
-	return g.secret.Name
+	return g.name()
 }
 
 // chatLines are the things said in an open chat, as the screen shows them.
@@ -117,8 +117,9 @@ func (m *Model) searchCommand(current *groupState, argument string) tea.Cmd {
 	}
 	// A chat that matched but had no room left in the list still counts, and the page says so.
 	query := request.Query
-	m.pageFooter = "↑/↓ PgUp/PgDn scroll  ·  Esc to go back"
-	return m.openPage("search "+query, func(width int) string {
+	command := m.openPage("search "+query, func(width int) string {
 		return ui.SearchResults(width, strings.TrimSpace(query), groups, total, shown)
 	})
+	m.pageFooter = "↑/↓ scroll  ·  / search again  ·  Esc back  ·  select text to copy" // after openPage, which clears it
+	return command
 }

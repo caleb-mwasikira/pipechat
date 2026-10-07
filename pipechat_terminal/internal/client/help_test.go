@@ -157,7 +157,7 @@ func TestLoginScreenShowsWhereToRegister(t *testing.T) {
 
 	// Until the server says otherwise, the website is taken to be at the server's own address.
 	view := m.authView()
-	for _, want := range []string{"No account yet?", "https://chat.example.com/register", "Forgot your password?", "https://chat.example.com/forgot-password"} {
+	for _, want := range []string{"Create an account", "https://chat.example.com/register", "Forgot your password?", "https://chat.example.com/forgot-password"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("the login screen lacks %q:\n%s", want, view)
 		}

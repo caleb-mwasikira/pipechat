@@ -3,11 +3,8 @@ package handlers
 import (
 	"fmt"
 	"log"
-	"mime"
 	"net/http"
 	"net/mail"
-	"net/smtp"
-	"strings"
 	"time"
 
 	"pipechat/internal/crypto"
@@ -28,7 +25,7 @@ const (
 )
 
 // sendEmail delivers one email. Tests replace it.
-var sendEmail = smtp.SendMail
+var sendEmail = smtpSend
 
 // POST /api/invitations
 func inviteByEmail(w http.ResponseWriter, r *http.Request) {
@@ -86,10 +83,6 @@ func inviteByEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func emailInvitation(recipient *mail.Address, inviter string, secret *crypto.Secret) error {
-	sender, err := mail.ParseAddress(Config.SMTPFrom)
-	if err != nil {
-		return fmt.Errorf("SMTP_FROM is not an email address")
-	}
 	body := fmt.Sprintf(`@%s invited you to the group "%s" on Pipechat.
 
 Start the chat client, type /join, then paste this code:
@@ -100,30 +93,5 @@ Keep this code private: it is the group's encryption key. Anyone who has it can
 read and write in the group.
 `, inviter, secret.Name, secret.Code())
 
-	headers := []string{
-		"From: " + sender.String(),
-		"To: " + recipient.String(),
-		"Subject: " + mime.QEncoding.Encode("utf-8", `Invitation to join "`+secret.Name+`" on Pipechat`),
-		"Date: " + time.Now().Format(time.RFC1123Z),
-		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=utf-8",
-	}
-	message := strings.Join(headers, "\r\n") + "\r\n\r\n" + strings.ReplaceAll(body, "\n", "\r\n")
-
-	var authentication smtp.Auth
-	if Config.SMTPUsername != "" {
-		authentication = smtp.PlainAuth("", Config.SMTPUsername, Config.SMTPPassword, Config.SMTPHost)
-	}
-
-	// smtp.SendMail has no timeout of its own.
-	done := make(chan error, 1)
-	go func() {
-		done <- sendEmail(Config.SMTPHost+":"+Config.SMTPPort, authentication, sender.Address, []string{recipient.Address}, []byte(message))
-	}()
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(emailTimeout):
-		return fmt.Errorf("the mail server did not answer in %s", emailTimeout)
-	}
+	return sendMail(recipient, `Invitation to join "`+secret.Name+`" on Pipechat`, body)
 }

@@ -52,6 +52,7 @@ type groupState struct {
 	webID     int64           // the website group this came from, 0 if none
 	openName  string          // set on a group just made public: list it under this name once created
 	webGrant  bool            // true when the key came from another member (confirm it), false when we created it
+	title     string          // what the group is called now, when its creator renamed it; empty means the name in its code
 }
 
 // What the account's sealed vault holds. The server cannot read any of it.
@@ -62,6 +63,7 @@ type vaultData struct {
 	Pins       map[string]string     `json:"pins"`             // handle -> public key first seen for it
 	Files      map[string]fileRecord `json:"files"`            // short name -> shared file
 	Closed     []closedChat          `json:"closed,omitempty"` // chats taken out of the sidebar with /close
+	Titles     map[string]string     `json:"titles,omitempty"` // group id -> the name its creator gave it since the code was made
 }
 
 // What goes inside a sealed message.
@@ -157,6 +159,13 @@ type Model struct {
 	// Login screen.
 	emailInput    textinput.Model
 	passwordInput textinput.Model
+	nameInput     textinput.Model // making an account: the person's name
+	handleInput   textinput.Model // ...and the handle others see
+	confirmInput  textinput.Model // ...and the password again
+	codeInput     textinput.Model // resetting a password: the code from the email
+	authMode      authMode        // which of the account screens is showing
+	authBusy      bool            // a register, code or reset request is out
+	authNotice    string          // good news for the account screens, shown in green
 	focus         int
 	authError     string
 	pending       *pendingAuth
@@ -182,6 +191,11 @@ type Model struct {
 	checkedUpdate bool            // asked the server about updates this run
 	askedInfo     *Server         // the server already asked where to register
 	website       string          // where to register, as the server says; empty means the server's own address
+	newBelow      int             // messages that arrived while the chat was scrolled up
+	mouseWanted   bool            // the person wants the mouse wheel to scroll the chat (/mouse); off lets them select text everywhere
+	mouseCaptured bool            // what the terminal was last told: true while the program has the mouse
+	pageFind      pageSearch      // searching inside the page that is open, as in vim
+	pageBase      string          // the open page as it was drawn, without search marks
 	progress      *files.Progress // how far the upload or download has got
 	pathMode      bool            // the input holds /upload or /download, whose suggestions are file names
 	pageFooter    string          // what the bottom line of a page says; empty for the usual
@@ -219,10 +233,17 @@ func NewModel(store *Store, address string) *Model {
 		connectInput:  newInput("/connect pipechat.kibandaskimart.com", false),
 		emailInput:    newInput("email you registered with", false),
 		passwordInput: newInput("password", true),
+		nameInput:     newInput("your name", false),
+		handleInput:   newInput("a-z, 0-9, _ (3-20)", false),
+		confirmInput:  newInput("the same password again", true),
+		codeInput:     newInput("the code from the email", false),
 		input:         newInput("message or /command", false),
 		viewport:      viewport.New(10, 5),
 		groups:        []*groupState{{}},
 	}
+	m.handleInput.CharLimit, m.nameInput.CharLimit, m.codeInput.CharLimit = 20, 100, 24
+	m.mouseWanted = !store.MouseOff
+	m.mouseCaptured = m.mouseWanted // main starts the program with the mouse on unless the person turned it off
 	m.connectInput.Focus()
 	m.input.ShowSuggestions = true
 	m.input.CompletionStyle = ui.Dim
@@ -300,7 +321,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = max(10, m.width-4)
 		m.helpView.Width, m.helpView.Height = m.width, max(3, m.height-3)
 		if m.showHelp {
-			m.helpView.SetContent(m.pageContent(m.width))
+			m.renderPage()
 		}
 		m.refresh()
 		return m, nil
@@ -403,8 +424,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case musicList:
-		m.showMusic(message)
-		return m, nil
+		return m, m.showMusic(message)
 
 	case musicStart:
 		m.beginQueue(message)
@@ -422,6 +442,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.startOpenGroup(message)
 		return m, nil
 
+	case codeJoined:
+		m.codeJoined(message)
 	case openFound:
 		m.openFound(message)
 		return m, nil
@@ -440,6 +462,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case musicSaved:
 		m.handleMusicSaved(message)
+		return m, nil
+
+	case registerResult:
+		m.handleRegistered(message)
+		return m, nil
+
+	case forgotResult:
+		m.handleForgot(message)
+		return m, nil
+
+	case resetResult:
+		m.handleReset(message)
 		return m, nil
 
 	case infoResult:
@@ -492,6 +526,19 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseMsg:
+		if m.session == nil {
+			return m, nil
+		}
+		var command tea.Cmd
+		if m.showHelp {
+			m.helpView, command = m.helpView.Update(message) // the wheel scrolls a page too
+		} else {
+			m.viewport, command = m.viewport.Update(message)
+			m.scrolled()
+		}
+		return m, command
+
 	case tea.KeyMsg:
 		if message.String() == "ctrl+c" {
 			m.stopMusic()
@@ -512,6 +559,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 // ---- login screen ----
 
 func (m *Model) fields() []*textinput.Model {
+	switch m.authMode {
+	case modeRegister:
+		return []*textinput.Model{&m.nameInput, &m.handleInput, &m.emailInput, &m.passwordInput, &m.confirmInput}
+	case modeForgot:
+		return []*textinput.Model{&m.emailInput}
+	case modeReset:
+		return []*textinput.Model{&m.emailInput, &m.codeInput, &m.passwordInput, &m.confirmInput}
+	}
 	return []*textinput.Model{&m.emailInput, &m.passwordInput}
 }
 
@@ -533,6 +588,22 @@ func (m *Model) updateAuth(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.server, m.serverReached, m.online, m.pending = nil, false, false, nil
 		m.connectInput.Focus()
 		return m, nil
+	case "ctrl+r":
+		m.goToAuth(modeRegister)
+		return m, nil
+	case "ctrl+f":
+		m.goToAuth(modeForgot)
+		return m, nil
+	case "ctrl+t":
+		if m.authMode == modeForgot {
+			m.goToAuth(modeReset) // already has a code
+		}
+		return m, nil
+	case "esc":
+		if m.authMode != modeLogin {
+			m.goToAuth(modeLogin)
+		}
+		return m, nil
 	case "tab", "down":
 		m.focusField((m.focus + 1) % len(m.fields()))
 		return m, nil
@@ -553,6 +624,10 @@ func (m *Model) updateAuth(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) submitAuth() {
+	if m.authMode != modeLogin {
+		m.submitAccountForm()
+		return
+	}
 	email := strings.ToLower(strings.TrimSpace(m.emailInput.Value()))
 	password := m.passwordInput.Value()
 	switch {
@@ -578,27 +653,7 @@ func (m *Model) loginAsync(auth *pendingAuth, reconnect bool) {
 }
 
 func (m *Model) authView() string {
-	title := "Log in to Pipechat"
-	hint := "Enter to log in · Ctrl+S to change server · Ctrl+C to quit"
-	lines := []string{ui.Title.Render(title), "", "Email", m.emailInput.View(), "", "Password", m.passwordInput.View(), ""}
-	switch {
-	case m.pending != nil:
-		lines = append(lines, ui.Dim.Render("working..."))
-	case m.authError != "":
-		lines = append(lines, ui.Error.Render(m.authError))
-	case !m.online:
-		lines = append(lines, ui.Dim.Render("connecting to "+m.server.URL()+"..."))
-	default:
-		lines = append(lines, ui.Dim.Render("connected to "+m.server.URL()))
-	}
-	lines = append(lines, ui.Dim.Render(hint))
-	if m.server != nil {
-		// Accounts are made on the website, so say where it is.
-		lines = append(lines, "",
-			ui.Dim.Render("No account yet? Create one here:"), "  "+ui.Link(m.accountURL("/register"), m.accountURL("/register")),
-			ui.Dim.Render("Forgot your password?"), "  "+ui.Link(m.accountURL("/forgot-password"), m.accountURL("/forgot-password")))
-	}
-	box := ui.AuthBox.Render(strings.Join(lines, "\n"))
+	box := ui.AuthBox.Render(strings.Join(m.authLines(), "\n"))
 	return lipgloss.Place(max(m.width, 1), max(m.height, 1), lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -743,7 +798,7 @@ func (m *Model) handleJoined(result joinResult) {
 		if errors.As(result.err, &failure) && failure.Status == http.StatusForbidden && strings.Contains(failure.Message, "no longer a member") {
 			if g.adding {
 				m.removeGroup(g)
-				m.notice(m.groups[m.current], "could not join "+g.secret.Name+": "+failure.Message)
+				m.notice(m.groups[m.current], "could not join "+g.name()+": "+failure.Message)
 			} else {
 				m.droppedFromGroup(g)
 			}
@@ -836,7 +891,7 @@ func (m *Model) loadVault(sealed []byte) {
 	m.identity = identity
 	for _, code := range saved.Groups {
 		if secret, err := crypto.ParseCode(code); err == nil {
-			group := &groupState{secret: secret}
+			group := &groupState{secret: secret, title: m.vault.Titles[secret.GIDHex()]}
 			m.groups = append(m.groups, group)
 			m.replayHistory(group)
 		}
@@ -977,9 +1032,12 @@ func (m *Model) openPage(title string, content func(width int) string) tea.Cmd {
 	}
 	m.showHelp, m.pageTitle, m.pageContent = true, title, content
 	m.helpView.Width, m.helpView.Height = m.width, max(3, m.height-3)
-	m.helpView.SetContent(content(m.width))
+	m.pageFind = pageSearch{} // a new page starts with no search
+	m.renderPage()
 	m.helpView.GotoTop()
-	return tea.ClearScreen
+	// A page has text worth copying (hashes, names, links), so the mouse is let go of: the terminal can select
+	// it as usual. The wheel still scrolls in most terminals, which turn it into arrow keys on this screen.
+	return tea.Batch(tea.ClearScreen, m.setMouse(false))
 }
 
 // lookupProfile asks the server about a user; the answer opens their page.
@@ -1020,7 +1078,7 @@ func (m *Model) showProfile(result profileResult) tea.Cmd {
 }
 
 func (m *Model) droppedFromGroup(g *groupState) {
-	name := g.secret.Name
+	name := g.name()
 	m.store.History.Forget(m.seqKey(g.secret.GIDHex()))
 	m.removeGroup(g)
 	m.saveVault()
@@ -1100,6 +1158,8 @@ func (m *Model) receiveMessage(frame Event, replay bool) {
 	g.entries[position] = line
 	if !replay && g != m.groups[m.current] {
 		g.unread++
+	} else if !replay && g == m.groups[m.current] && !m.viewport.AtBottom() && !line.self {
+		m.newBelow++ // someone spoke while we were reading further up
 	}
 }
 
@@ -1159,20 +1219,18 @@ func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "enter", "y", "Y":
 				pending := m.pendingSend
 				m.showHelp, m.pendingSend, m.pageFooter = false, nil, ""
-				return m, tea.Batch(tea.ClearScreen, m.startUpload(pending.target, pending.argument))
+				return m, tea.Batch(m.pageClosed(), m.startUpload(pending.target, pending.argument))
 			case "esc", "n", "N", "q":
 				m.notice(m.pendingSend.target, "upload cancelled")
 				m.showHelp, m.pendingSend, m.pageFooter = false, nil, ""
-				return m, tea.ClearScreen
+				return m, m.pageClosed()
 			}
 			var command tea.Cmd
 			m.helpView, command = m.helpView.Update(key)
 			return m, command
 		}
-		switch key.String() {
-		case "esc", "q", "enter", " ", "ctrl+h", "/":
-			m.showHelp = false
-			return m, tea.ClearScreen
+		if handled, command := m.pageKey(key); handled {
+			return m, command
 		}
 		var command tea.Cmd
 		m.helpView, command = m.helpView.Update(key)
@@ -1191,7 +1249,23 @@ func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgup", "pgdown":
 		var command tea.Cmd
 		m.viewport, command = m.viewport.Update(key)
+		m.scrolled()
 		return m, command
+	case "up", "down":
+		if m.suggestionShown() {
+			break // the arrows move through the suggestions
+		}
+		if key.String() == "up" {
+			m.viewport.LineUp(1)
+		} else {
+			m.viewport.LineDown(1)
+		}
+		m.scrolled()
+		return m, nil
+	case "esc":
+		m.viewport.GotoBottom() // back to the newest message
+		m.scrolled()
+		return m, nil
 	case "enter":
 		text := strings.TrimSpace(m.input.Value())
 		m.input.Reset()
@@ -1237,6 +1311,8 @@ func (m *Model) switchTo(index int) {
 	m.current = index
 	m.groups[index].unread = 0
 	m.fetchOnline()
+	m.viewport.GotoBottom() // a chat opens at its newest message, wherever the last one was left
+	m.newBelow = 0
 	m.refresh()
 }
 
@@ -1268,8 +1344,10 @@ func (m *Model) runCommand(text string) tea.Cmd {
 	case "/join":
 		secret, err := crypto.ParseCode(argument)
 		if err != nil {
-			// Not an invite code: perhaps the name of a public group.
-			if openNamePattern.MatchString(argument) {
+			// Not a chat invite code: perhaps a short code from the website, or the name of a public group.
+			if inviteCodePattern.MatchString(argument) {
+				m.joinByCode(current, argument)
+			} else if openNamePattern.MatchString(argument) {
 				m.joinByName(current, argument)
 			} else {
 				m.notice(current, "/join takes an invite code or the name of a public group (see /public)")
@@ -1354,7 +1432,7 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		return m.startDownload(current, argument)
 
 	case "/files":
-		m.showShared(current)
+		return m.showShared()
 
 	case "/link":
 		if file, err := m.findShared(argument); err != nil {
@@ -1387,7 +1465,7 @@ func (m *Model) runCommand(text string) tea.Cmd {
 			m.notice(current, "select a group first")
 			break
 		}
-		m.notice(current, "Invite code for "+current.secret.Name+" (anyone with it can read the group, share it privately):\n"+current.secret.Code())
+		m.notice(current, "Invite code for "+current.name()+" (anyone with it can read the group, share it privately):\n"+current.secret.Code())
 
 	case "/invite":
 		if current.direct {
@@ -1412,7 +1490,12 @@ func (m *Model) runCommand(text string) tea.Cmd {
 
 	case "/groups":
 		for index, g := range m.groups[1:] {
-			m.notice(current, fmt.Sprintf("%d. %s", index+1, g.secret.Name))
+			// The name can change; the id never does.
+			kind := "id " + g.secret.GIDHex()[:8]
+			if g.direct {
+				kind = "private chat"
+			}
+			m.notice(current, fmt.Sprintf("%d. %s  (%s)", index+1, g.name(), kind))
 		}
 
 	case "/switch":
@@ -1426,11 +1509,13 @@ func (m *Model) runCommand(text string) tea.Cmd {
 	case "/search", "/find":
 		return m.searchCommand(current, argument)
 
+	case "/mouse":
+		return m.mouseCommand(current, strings.ToLower(argument))
+
 	case "/update":
 		m.updateCommand(current)
 
 	case "/music":
-		m.notice(current, "asking the server for the music library...")
 		m.server.enqueue(func() {
 			tracks, err := m.server.Music()
 			m.server.report(musicList{tracks: tracks, err: err})
@@ -1559,11 +1644,7 @@ func (m *Model) View() string {
 	}
 	if m.showHelp {
 		title := ui.Title.Render("Pipechat") + ui.Dim.Render("  "+m.pageTitle)
-		footer := ui.Dim.Render("↑/↓ PgUp/PgDn scroll  ·  Esc, Enter or q to go back")
-		if m.pageFooter != "" {
-			footer = ui.Key.Render(m.pageFooter)
-		}
-		return title + "\n\n" + m.helpView.View() + "\n" + footer
+		return title + "\n\n" + m.helpView.View() + "\n" + m.pageFooterLine()
 	}
 	status := "● online"
 	if !m.connected {
@@ -1583,7 +1664,7 @@ func (m *Model) View() string {
 	for index, g := range m.groups {
 		label := "welcome"
 		if g.secret != nil {
-			label = g.secret.Name
+			label = g.name()
 		}
 		if g.unread > 0 {
 			label += fmt.Sprintf(" (%d)", g.unread)
@@ -1602,10 +1683,17 @@ func (m *Model) View() string {
 
 	title := "welcome"
 	if secret := m.groups[m.current].secret; secret != nil {
-		title = secret.Name + ui.Dim.Render("  · end-to-end encrypted")
+		title = m.groups[m.current].name() + ui.Dim.Render("  · end-to-end encrypted")
 		if m.groups[m.current].direct {
 			title += ui.Dim.Render(" · direct")
 		}
+	}
+	if !m.viewport.AtBottom() {
+		hint := fmt.Sprintf("  ↑ reading older · %d%% · Esc: latest", int(m.viewport.ScrollPercent()*100))
+		if m.newBelow > 0 {
+			hint = fmt.Sprintf("  ↓ %d new below · Esc: latest", m.newBelow)
+		}
+		title += ui.Key.Render(hint)
 	}
 	chat := lipgloss.JoinVertical(lipgloss.Left, ui.Active.Render(title), m.viewport.View())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " "+strings.ReplaceAll(chat, "\n", "\n "))
@@ -1858,4 +1946,58 @@ func (m *Model) askWhereToRegister() {
 		website, err := server.Info()
 		server.report(infoResult{website: website, err: err})
 	}()
+}
+
+// scrolled tidies up after the chat was scrolled: once the newest message is in view again, nothing is waiting below.
+func (m *Model) scrolled() {
+	if m.viewport.AtBottom() {
+		m.newBelow = 0
+	}
+}
+
+// name is what a group is called: the name its creator gave it since, or else the one in its invite code.
+func (g *groupState) name() string {
+	if g.title != "" {
+		return g.title
+	}
+	return g.secret.Name
+}
+
+// setMouse tells the terminal whether the program wants the mouse. Without it, the terminal can select and copy text.
+func (m *Model) setMouse(on bool) tea.Cmd {
+	m.mouseCaptured = on
+	if on {
+		return tea.EnableMouseCellMotion
+	}
+	return tea.DisableMouse
+}
+
+// pageClosed is what to ask of the terminal when a full-screen page closes: draw the chat again, and take the
+// mouse back for scrolling, unless the person turned that off.
+func (m *Model) pageClosed() tea.Cmd {
+	return tea.Batch(tea.ClearScreen, m.setMouse(m.mouseWanted))
+}
+
+// mouseCommand handles /mouse on|off. With the mouse on, its wheel scrolls the chat but the terminal cannot select
+// text without a modifier key (usually Shift); off, text can be selected and copied freely.
+func (m *Model) mouseCommand(current *groupState, argument string) tea.Cmd {
+	switch argument {
+	case "on":
+		m.mouseWanted = true
+	case "off":
+		m.mouseWanted = false
+	case "":
+		m.mouseWanted = !m.mouseWanted
+	default:
+		m.notice(current, "usage: /mouse on|off")
+		return nil
+	}
+	m.store.MouseOff = !m.mouseWanted
+	m.store.Save()
+	if m.mouseWanted {
+		m.notice(current, "mouse on: the wheel scrolls the chat. To select text, hold Shift while dragging.")
+	} else {
+		m.notice(current, "mouse off: select and copy text freely. Scroll with the arrow keys or PgUp/PgDn; /mouse on brings the wheel back.")
+	}
+	return m.setMouse(m.mouseWanted)
 }

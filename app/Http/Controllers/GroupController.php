@@ -8,9 +8,9 @@ use App\Models\User;
 use App\Support\SafeMail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 /*
  * Groups on the website. Only names, members and invitations live here; the
@@ -49,19 +49,19 @@ class GroupController extends Controller
     }
 
     /** The page of one group: who is in it and online, what was shared, and how busy it is. */
-    public function show(Request $request, int $group)
+    /**
+     * The group, its members and the numbers every page of the group shows. Only members may look.
+     * The chat server keeps some tables itself, so they may not exist yet.
+     */
+    private function loadGroup(Request $request, int $group): array
     {
-        $user = $request->user();
         $row = DB::table('chat_groups')->find($group) ?? abort(404);
-        abort_unless(DB::table('chat_group_members')->where('group_id', $group)->where('user_id', $user->id)->exists(), 403);
+        abort_unless(DB::table('chat_group_members')->where('group_id', $group)->where('user_id', $request->user()->id)->exists(), 403);
 
-        // The chat server keeps these tables itself, so they may not exist yet.
-        $hasPresence = Schema::hasTable('presence');
         $recently = now()->subSeconds(75)->timestamp;
-
         $members = DB::table('chat_group_members as m')
             ->join('users as u', 'u.id', '=', 'm.user_id')
-            ->when($hasPresence, fn ($q) => $q->leftJoin('presence as p', 'p.handle', '=', 'u.handle')
+            ->when(Schema::hasTable('presence'), fn ($q) => $q->leftJoin('presence as p', 'p.handle', '=', 'u.handle')
                 ->addSelect('p.online', 'p.last_seen'))
             ->where('m.group_id', $group)
             ->addSelect('u.id', 'u.handle', 'u.name', 'u.bio', 'm.delivered', 'm.created_at as joined_at')
@@ -73,34 +73,74 @@ class GroupController extends Controller
             ->sortBy([fn ($a, $b) => $b->is_owner <=> $a->is_owner, fn ($a, $b) => $b->is_online <=> $a->is_online, fn ($a, $b) => strcmp($a->handle, $b->handle)])
             ->values();
 
-        $messages = ['stored' => 0, 'last' => null];
-        if ($row->gid && Schema::hasTable('messages')) {
-            $messages['stored'] = DB::table('messages')->where('group_id', $row->gid)->count();
-            $last = DB::table('messages')->where('group_id', $row->gid)->max('ts');
-            $messages['last'] = $last ? Carbon::createFromTimestampMs($last) : null;
-        }
+        $counts = [
+            'files' => DB::table('chat_group_files')->where('group_id', $group)->count(),
+            'tracks' => DB::table('tracks')->whereIn('uploaded_by', $members->pluck('id'))->count(),
+        ];
 
-        $memberIds = $members->pluck('id');
-
-        return view('group-details', [
+        return [
             'group' => $row,
             'owner' => $members->firstWhere('is_owner', true),
             'members' => $members,
             'onlineCount' => $members->where('is_online', true)->count(),
-            'messages' => $messages,
-            'files' => DB::table('chat_group_files as f')
-                ->leftJoin('users as u', 'u.id', '=', 'f.user_id')
-                ->where('f.group_id', $group)->select('f.*', 'u.handle as sharer')
-                ->orderByDesc('f.id')->limit(50)->get(),
-            'tracks' => DB::table('tracks as t')
-                ->join('users as u', 'u.id', '=', 't.uploaded_by')
-                ->whereIn('t.uploaded_by', $memberIds)->select('t.*', 'u.handle as uploader')
-                ->orderByDesc('t.id')->limit(50)->get(),
+            'counts' => $counts,
+        ];
+    }
+
+    /** Overview: who is in the group and who is online. Files and music have pages of their own. */
+    public function show(Request $request, int $group)
+    {
+        $page = $this->loadGroup($request, $group);
+
+        return view('group-details', $page + [
+            'codes' => $page['group']->owner_id === $request->user()->id
+                ? DB::table('chat_group_invite_codes')->where('group_id', $group)->where('expires_at', '>', now())->orderByDesc('id')->get()
+                : collect(),
             'invited' => DB::table('chat_group_invites as i')
                 ->join('users as u', 'u.id', '=', 'i.invitee_id')
                 ->where('i.group_id', $group)->where('i.status', 'pending')->orderBy('u.handle')->pluck('u.handle'),
+        ]);
+    }
+
+    /** The files members shared in the group. */
+    public function files(Request $request, int $group)
+    {
+        return view('group-files', $this->loadGroup($request, $group) + [
+            'files' => DB::table('chat_group_files as f')
+                ->leftJoin('users as u', 'u.id', '=', 'f.user_id')
+                ->where('f.group_id', $group)->select('f.*', 'u.handle as sharer')
+                ->orderByDesc('f.id')->limit(200)->get(),
             'now' => now(),
         ]);
+    }
+
+    /** The music the group's members uploaded to the library. */
+    public function music(Request $request, int $group)
+    {
+        $page = $this->loadGroup($request, $group);
+
+        return view('group-music', $page + [
+            'tracks' => DB::table('tracks as t')
+                ->join('users as u', 'u.id', '=', 't.uploaded_by')
+                ->whereIn('t.uploaded_by', $page['members']->pluck('id'))->select('t.*', 'u.handle as uploader')
+                ->orderByDesc('t.id')->limit(200)->get(),
+        ]);
+    }
+
+    /** The creator changes the group's name. Terminals pick the new name up the next time they sync. */
+    public function rename(Request $request, int $group): RedirectResponse
+    {
+        $row = DB::table('chat_groups')->find($group) ?? abort(404);
+        abort_unless($row->owner_id === $request->user()->id, 403);
+        $data = $request->validate(['name' => ['required', 'string', 'max:24', 'regex:/^[^\x00-\x1f\x7f]+$/u']]);
+        $name = trim($data['name']);
+
+        if ($row->is_public && DB::table('chat_groups')->where('is_public', true)->where('id', '<>', $group)->whereRaw('lower(name) = ?', [mb_strtolower($name)])->exists()) {
+            return back()->withErrors(['rename' => 'A public group with that name already exists.'])->withInput();
+        }
+        DB::table('chat_groups')->where('id', $group)->update(['name' => $name, 'updated_at' => now()]);
+
+        return back()->with('status', $name === $row->name ? 'The name is unchanged.' : "Renamed to \"{$name}\". Terminals show the new name once they sync.");
     }
 
     public function store(Request $request): RedirectResponse
@@ -122,7 +162,7 @@ class GroupController extends Controller
 
         DB::transaction(function () use ($data, $user, $public) {
             $group = DB::table('chat_groups')->insertGetId([
-                'name' => $data['name'], 'owner_id' => $user->id, 'is_public' => $public,
+                'name' => $data['name'], 'owner_id' => $user->id, 'is_public' => $public, 'invite_token' => Str::random(32),
                 'created_at' => now(), 'updated_at' => now(),
             ]);
             DB::table('chat_group_members')->insert([
@@ -167,6 +207,63 @@ class GroupController extends Controller
         DB::table('chat_groups')->where('id', $group)->update(['is_public' => $public, 'updated_at' => now()]);
 
         return back()->with('status', $public ? 'This group is now public: anyone can join it.' : 'This group is now private. Members stay; new people need an invitation.');
+    }
+
+    /** The creator turns the invite link on or off, or replaces it so the old one stops working. */
+    public function inviteLink(Request $request, int $group): RedirectResponse
+    {
+        $row = DB::table('chat_groups')->find($group) ?? abort(404);
+        abort_unless($row->owner_id === $request->user()->id, 403);
+        $action = $request->validate(['action' => ['required', 'in:reset,disable,enable']])['action'];
+
+        $token = $action === 'disable' ? null : Str::random(32);
+        if ($action === 'enable' && $row->invite_token) {
+            $token = $row->invite_token; // already on: leave the link as it is
+        }
+        DB::table('chat_groups')->where('id', $group)->update(['invite_token' => $token, 'updated_at' => now()]);
+
+        return back()->with('status', match ($action) {
+            'disable' => 'Invite link turned off. Anyone who has it can no longer join with it.',
+            'reset' => 'New invite link made. The old one no longer works.',
+            default => 'Invite link turned on.',
+        });
+    }
+
+    /** Codes are 8 characters without the ones people mix up (0 O 1 I); typed as XXXX-XXXX. */
+    private const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    private const CODE_DAYS = 7;
+    private const CODE_USES = 25;
+
+    /** The creator makes a short code for terminal users: /join CODE. */
+    public function createCode(Request $request, int $group): RedirectResponse
+    {
+        $row = DB::table('chat_groups')->find($group) ?? abort(404);
+        abort_unless($row->owner_id === $request->user()->id, 403);
+        if (DB::table('chat_group_invite_codes')->where('group_id', $group)->where('expires_at', '>', now())->count() >= 10) {
+            return back()->with('error', 'This group has 10 codes in use. Revoke one before making another.');
+        }
+
+        do {
+            $code = collect(range(1, 8))->map(fn () => self::CODE_ALPHABET[random_int(0, strlen(self::CODE_ALPHABET) - 1)])->implode('');
+        } while (DB::table('chat_group_invite_codes')->where('code', $code)->exists());
+
+        DB::table('chat_group_invite_codes')->insert([
+            'group_id' => $group, 'created_by' => $request->user()->id, 'code' => $code, 'max_uses' => self::CODE_USES,
+            'expires_at' => now()->addDays(self::CODE_DAYS), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        // Shown once in full, for copying: the page keeps listing it afterwards too.
+        return back()->with('status', 'Invite code made: '.substr($code, 0, 4).'-'.substr($code, 4).'.')->with('new_code', $code);
+    }
+
+    /** The creator revokes a code: it stops working at once. */
+    public function revokeCode(Request $request, int $group, int $code): RedirectResponse
+    {
+        $row = DB::table('chat_groups')->find($group) ?? abort(404);
+        abort_unless($row->owner_id === $request->user()->id, 403);
+        DB::table('chat_group_invite_codes')->where('id', $code)->where('group_id', $group)->delete();
+
+        return back()->with('status', 'Invite code revoked.');
     }
 
     public function invite(Request $request, int $group): RedirectResponse

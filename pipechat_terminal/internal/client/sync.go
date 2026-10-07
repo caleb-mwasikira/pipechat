@@ -62,6 +62,8 @@ func (m *Model) handleSync(result syncResult) {
 		return true
 	}
 
+	m.applyGroupNames(result.sync)
+
 	for _, item := range result.sync.Create {
 		if !once(fmt.Sprintf("create/%d", item.ID)) {
 			continue
@@ -80,7 +82,7 @@ func (m *Model) handleSync(result syncResult) {
 			continue
 		}
 		if pinned, known := m.vault.Pins[item.Handle]; known && pinned != item.PubKey {
-			m.notice(m.groups[0], "WARNING: the key of @"+item.Handle+" changed; not sharing "+group.secret.Name+" with them.")
+			m.notice(m.groups[0], "WARNING: the key of @"+item.Handle+" changed; not sharing "+group.name()+" with them.")
 			continue
 		}
 		public, err := crypto.ParsePublicKey(item.PubKey)
@@ -151,4 +153,63 @@ func (m *Model) groupByGID(gid string) *groupState {
 		}
 	}
 	return nil
+}
+
+// applyGroupNames shows the name the website has for each group, which changes when its creator renames it.
+func (m *Model) applyGroupNames(sync SyncResult) {
+	changed := false
+	for _, item := range sync.Names {
+		g := m.groupByGID(item.GID)
+		if g == nil || item.Name == "" {
+			continue
+		}
+		title := item.Name
+		if title == g.secret.Name {
+			title = "" // the name in the code is right again
+		}
+		if g.title == title {
+			continue
+		}
+		before := g.name()
+		g.title = title
+		if m.vault.Titles == nil {
+			m.vault.Titles = map[string]string{}
+		}
+		if title == "" {
+			delete(m.vault.Titles, item.GID)
+		} else {
+			m.vault.Titles[item.GID] = title
+		}
+		if before != g.name() {
+			m.notice(m.groups[0], "The group "+before+" is now called "+g.name()+".")
+		}
+		changed = true
+	}
+	// A chat that was closed is found by name too, and its name can change while it is closed: the group id in
+	// its code is what stays, so the new name is looked up by that.
+	for index, chat := range m.vault.Closed {
+		secret, err := crypto.ParseCode(chat.Code)
+		if chat.Code == "" || err != nil {
+			continue
+		}
+		for _, item := range sync.Names {
+			if item.GID == secret.GIDHex() && item.Name != "" && item.Name != chat.Name {
+				m.vault.Closed[index].Name = item.Name
+				if item.Name != secret.Name {
+					if m.vault.Titles == nil {
+						m.vault.Titles = map[string]string{}
+					}
+					m.vault.Titles[item.GID] = item.Name
+				} else {
+					delete(m.vault.Titles, item.GID)
+				}
+				changed = true
+			}
+		}
+	}
+	if changed {
+		m.saveVault()
+		m.refreshSuggestions()
+		m.refresh()
+	}
 }

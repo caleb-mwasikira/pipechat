@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"pipechat/internal/client/files"
 	"regexp"
 	"strings"
 
@@ -22,6 +23,11 @@ type openChecked struct {
 type openFound struct {
 	name  string
 	group OpenGroup
+	err   error
+}
+type codeJoined struct {
+	input string
+	name  string
 	err   error
 }
 type openListed struct {
@@ -82,6 +88,33 @@ func (m *Model) startOpenGroup(result openChecked) {
 		m.groups[len(m.groups)-1].openName = result.name
 		m.notice(m.groups[len(m.groups)-1], "This group is public: anyone can join it with /join "+result.name+". The server can read public groups.")
 	}
+}
+
+// inviteCodePattern is the shape of a short code from the website: 8 characters, usually typed XXXX-XXXX.
+var inviteCodePattern = regexp.MustCompile(`^(?i)[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$`)
+
+// joinByCode redeems a short invite code. If the server does not know it, the text may still be a public group's name.
+func (m *Model) joinByCode(current *groupState, code string) {
+	server := m.server
+	go func() {
+		name, err := server.JoinWithCode(code)
+		server.report(codeJoined{input: code, name: name, err: err})
+	}()
+	m.notice(current, "checking the invite code...")
+}
+
+func (m *Model) codeJoined(result codeJoined) {
+	current := m.groups[m.current]
+	if result.err != nil {
+		if isNotFound(result.err) && openNamePattern.MatchString(result.input) {
+			m.joinByName(current, result.input)
+			return
+		}
+		m.notice(current, "could not use that code: "+result.err.Error())
+		return
+	}
+	m.notice(current, "You joined "+result.name+". It will appear in your chat list in a moment.")
+	m.syncAsync()
 }
 
 // joinByName handles /join NAME for a public group.
@@ -152,7 +185,7 @@ func (m *Model) closeCommand(current *groupState) {
 		return
 	}
 	id := current.secret.GIDHex()
-	closed := closedChat{Name: current.secret.Name}
+	closed := closedChat{Name: current.name()}
 	if current.direct {
 		closed = closedChat{Name: "@" + current.peer, Peer: current.peer}
 		kept := []string{}
@@ -189,6 +222,9 @@ func (m *Model) closedCommand(current *groupState) {
 // reopenCommand handles /reopen NAME.
 func (m *Model) reopenCommand(current *groupState, argument string) {
 	name := strings.TrimSpace(argument)
+	if words := files.SplitArguments(name); len(words) == 1 {
+		name = words[0] // a name with spaces may be in quotes
+	}
 	if name == "" {
 		m.closedCommand(current)
 		return
@@ -208,7 +244,7 @@ func (m *Model) reopenCommand(current *groupState, argument string) {
 			m.notice(current, "that chat's code is damaged: "+err.Error())
 			return
 		}
-		g := &groupState{secret: secret, adding: true}
+		g := &groupState{secret: secret, adding: true, title: m.vault.Titles[secret.GIDHex()]}
 		m.groups = append(m.groups, g)
 		m.joinGroupAsync(g)
 		m.replayHistory(g)

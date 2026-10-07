@@ -12,6 +12,7 @@ import (
 	"net/smtp"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -60,13 +61,16 @@ func testDatabase(t *testing.T) string {
 
 // The website's tables, as its Laravel migrations make them (only the columns the server uses).
 const websiteSchema = `
-CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, bio TEXT, created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
+CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, bio TEXT, remember_token TEXT, created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
-CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
+CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMP, updated_at TIMESTAMP, UNIQUE (group_id, user_id));
+CREATE TABLE chat_group_invite_codes (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), code TEXT NOT NULL UNIQUE, uses INT NOT NULL DEFAULT 0, max_uses INT NOT NULL DEFAULT 25, expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP, updated_at TIMESTAMP);
 CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
 CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, uploaded_by BIGINT REFERENCES users(id));
 CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, expires_at TIMESTAMP, created_at TIMESTAMP);
 CREATE TABLE binaries (id BIGSERIAL PRIMARY KEY, os TEXT NOT NULL, arch TEXT NOT NULL, version TEXT NOT NULL, filename TEXT NOT NULL, path TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT NOT NULL, sha256 TEXT NOT NULL);
+CREATE TABLE password_reset_tokens (email TEXT PRIMARY KEY, token TEXT NOT NULL, created_at TIMESTAMP);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id BIGINT);
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
 // useServer starts the routes on a fresh database schema and returns the server's address.
@@ -85,6 +89,9 @@ func useServer(t *testing.T) string {
 	t.Cleanup(func() { Pool, Config = previousPool, previousConfig })
 	Pool = pool
 	Config = &config.Config{FilesDir: t.TempDir(), MaxUploadBytes: 1000, FileDays: 7}
+	previousCost := passwordCost
+	passwordCost = bcrypt.MinCost // the real cost would make every test slow
+	t.Cleanup(func() { passwordCost = previousCost })
 	live.sessions = map[string]*session{}
 	live.members = map[string]map[*session]bool{}
 	live.online = map[string]map[*session]bool{}
@@ -943,5 +950,202 @@ func TestInfoSaysWhereToRegisterWithoutALogin(t *testing.T) {
 	Config.WebsiteURL = "https://pipechat.example.com"
 	if status := call(t, "GET", base+"/api/info", "", nil, &info); status != 200 || info.Website != "https://pipechat.example.com" {
 		t.Fatalf("configured: %d %+v", status, info)
+	}
+}
+
+// ---- accounts made and mended from the terminal ----
+
+type sentMail struct{ to, body string }
+
+// captureMail makes the server "send" email into a channel, with mail set up as if SMTP were configured.
+func captureMail(t *testing.T) chan sentMail {
+	sent := make(chan sentMail, 10)
+	previous := sendEmail
+	sendEmail = func(address string, a smtp.Auth, from string, to []string, message []byte) error {
+		sent <- sentMail{to: to[0], body: string(message)}
+		return nil
+	}
+	t.Cleanup(func() { sendEmail = previous })
+	Config.SMTPHost, Config.SMTPPort, Config.SMTPFrom = "smtp.test", "587", "Pipechat <noreply@example.com>"
+	Config.WebsiteURL = "https://site.example.com"
+	return sent
+}
+
+func register(t *testing.T, base string, request registerRequest) (int, errorResponse) {
+	var failure errorResponse
+	status := call(t, "POST", base+"/api/auth/register", "", request, &failure)
+	return status, failure
+}
+
+func TestRegisteringFromTheTerminal(t *testing.T) {
+	base := useServer(t)
+	sent := captureMail(t)
+	good := registerRequest{Name: "Ann Example", Handle: "ann_e", Email: "  Ann@Example.com ", Password: "correct horse"}
+
+	if status, failure := register(t, base, good); status != http.StatusCreated {
+		t.Fatalf("register: %d %+v", status, failure)
+	}
+	// The account is the website's: its row, with a bcrypt hash the website can check, and the email in lower case.
+	var name, handle, email, hash string
+	Pool.QueryRow(`SELECT name, handle, email, password FROM users WHERE handle = 'ann_e'`).Scan(&name, &handle, &email, &hash)
+	if name != "Ann Example" || email != "ann@example.com" || !strings.HasPrefix(hash, "$2a$") || strings.Contains(hash, "correct horse") {
+		t.Fatalf("stored: %q %q %q", name, email, hash)
+	}
+	// It logs in straight away, with the email and password just chosen.
+	var login authResponse
+	if status := call(t, "POST", base+"/api/auth/login", "", authRequest{Email: "ann@example.com", Password: "correct horse"}, &login); status != 200 || login.Handle != "ann_e" {
+		t.Fatalf("login after registering: %d %+v", status, login)
+	}
+	select {
+	case mail := <-sent:
+		if mail.to != "ann@example.com" || !strings.Contains(mail.body, "@ann_e") || !strings.Contains(mail.body, "Welcome to Pipechat") {
+			t.Fatalf("welcome email: %+v", mail)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a welcome email should be sent")
+	}
+
+	for name, c := range map[string]struct {
+		change func(*registerRequest)
+		status int
+		says   string
+	}{
+		"email taken":       {func(r *registerRequest) { r.Handle = "other"; r.Email = "ANN@example.com" }, http.StatusConflict, "email already has an account"},
+		"handle taken":      {func(r *registerRequest) { r.Email = "other@example.com" }, http.StatusConflict, "handle is taken"},
+		"handle too short":  {func(r *registerRequest) { r.Handle = "ab" }, http.StatusBadRequest, "3-20 characters"},
+		"handle with caps":  {func(r *registerRequest) { r.Handle = "Bobby" }, http.StatusBadRequest, "3-20 characters"},
+		"not an email":      {func(r *registerRequest) { r.Email = "nope" }, http.StatusBadRequest, "email address"},
+		"short password":    {func(r *registerRequest) { r.Password = "short" }, http.StatusBadRequest, "at least 8"},
+		"password too long": {func(r *registerRequest) { r.Password = strings.Repeat("x", 73) }, http.StatusBadRequest, "at most 72"},
+		"no name":           {func(r *registerRequest) { r.Name = "  " }, http.StatusBadRequest, "name"},
+	} {
+		request := registerRequest{Name: "Bo", Handle: "bobby", Email: "bobby@example.com", Password: "correct horse"}
+		if name == "email taken" || name == "handle taken" {
+			request = good
+		}
+		c.change(&request)
+		if status, failure := register(t, base, request); status != c.status || !strings.Contains(failure.Error, c.says) {
+			t.Errorf("%s: %d %q, wanted %d with %q", name, status, failure.Error, c.status, c.says)
+		}
+	}
+	var count int
+	Pool.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
+	if count != 1 {
+		t.Fatalf("only the good account should exist, found %d", count)
+	}
+}
+
+func TestRegistrationsFromOnePlaceAreLimited(t *testing.T) {
+	base := useServer(t)
+	for i := range registrationsPerHour {
+		register(t, base, registerRequest{Name: "n", Handle: fmt.Sprintf("user%d", i), Email: fmt.Sprintf("u%d@example.com", i), Password: "correct horse"})
+	}
+	if status, _ := register(t, base, registerRequest{Name: "n", Handle: "onetoomany", Email: "late@example.com", Password: "correct horse"}); status != http.StatusTooManyRequests {
+		t.Fatalf("the sixth try in an hour: %d", status)
+	}
+}
+
+func TestResettingAPasswordWithACodeFromTheEmail(t *testing.T) {
+	base := useServer(t)
+	sent := captureMail(t)
+	register(t, base, registerRequest{Name: "Ann", Handle: "annie", Email: "ann@example.com", Password: "old password"})
+	<-sent // the welcome email
+	Pool.Exec(`INSERT INTO sessions (id, user_id) SELECT 's1', id FROM users WHERE handle = 'annie'`)
+
+	// Asking for a code gives the same answer for anyone, and only a real account gets an email.
+	var answer map[string]string
+	if status := call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "ann@example.com"}, &answer); status != http.StatusAccepted || !strings.Contains(answer["message"], "If that email has an account") {
+		t.Fatalf("forgot: %d %v", status, answer)
+	}
+	var mail sentMail
+	select {
+	case mail = <-sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a reset email should be sent")
+	}
+	code := regexp.MustCompile(`[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}`).FindString(mail.body)
+	if code == "" || !strings.Contains(mail.body, "https://site.example.com/reset-password/"+strings.ReplaceAll(code, "-", "")+"?email=ann%40example.com") {
+		t.Fatalf("the email should have the code and the website link:\n%s", mail.body)
+	}
+	call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "nobody@example.com"}, &answer)
+	call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "ann@example.com"}, &answer) // inside the minute
+	select {
+	case extra := <-sent:
+		t.Fatalf("no email for an unknown address or a second request inside a minute: %+v", extra)
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	reset := func(email string, code string, password string) int {
+		return call(t, "POST", base+"/api/auth/reset", "", resetRequest{Email: email, Code: code, Password: password}, nil)
+	}
+	if status := reset("ann@example.com", "AAAA-BBBB-CCCC", "brand new pass"); status != http.StatusBadRequest {
+		t.Fatalf("a wrong code: %d", status)
+	}
+	if status := reset("ann@example.com", code, "short"); status != http.StatusBadRequest {
+		t.Fatalf("a short password is refused, and the code stays good: %d", status)
+	}
+	if status := reset("nobody@example.com", code, "brand new pass"); status != http.StatusBadRequest {
+		t.Fatalf("someone else's email with this code: %d", status)
+	}
+	// The code may be typed in small letters, with spaces or dashes.
+	if status := reset("Ann@Example.com", strings.ToLower(strings.ReplaceAll(code, "-", " ")), "brand new pass"); status != http.StatusNoContent {
+		t.Fatalf("the right code: %d", status)
+	}
+
+	var response authResponse
+	if status := call(t, "POST", base+"/api/auth/login", "", authRequest{Email: "ann@example.com", Password: "brand new pass"}, &response); status != 200 {
+		t.Fatalf("the new password should log in: %d", status)
+	}
+	if status := call(t, "POST", base+"/api/auth/login", "", authRequest{Email: "ann@example.com", Password: "old password"}, nil); status != http.StatusUnauthorized {
+		t.Fatalf("the old password must stop working: %d", status)
+	}
+	if status := reset("ann@example.com", code, "another password"); status != http.StatusBadRequest {
+		t.Fatalf("a code works once: %d", status)
+	}
+	var sessions int
+	Pool.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessions)
+	if sessions != 0 {
+		t.Fatal("a reset signs the website out everywhere")
+	}
+}
+
+func TestAnOldResetCodeStopsWorkingAndWrongGuessesAreLimited(t *testing.T) {
+	base := useServer(t)
+	sent := captureMail(t)
+	register(t, base, registerRequest{Name: "Ann", Handle: "annie", Email: "ann@example.com", Password: "old password"})
+	<-sent
+	call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "ann@example.com"}, nil)
+	mail := <-sent
+	code := regexp.MustCompile(`[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}`).FindString(mail.body)
+
+	Pool.Exec(`UPDATE password_reset_tokens SET created_at = (now() AT TIME ZONE 'UTC') - interval '61 minutes'`)
+	if status := call(t, "POST", base+"/api/auth/reset", "", resetRequest{Email: "ann@example.com", Code: code, Password: "brand new pass"}, nil); status != http.StatusBadRequest {
+		t.Fatalf("after an hour the code is no good: %d", status)
+	}
+
+	// Guessing is stopped after a few tries, even for the right code.
+	Pool.Exec(`UPDATE password_reset_tokens SET created_at = (now() AT TIME ZONE 'UTC')`)
+	for range failuresLimit {
+		call(t, "POST", base+"/api/auth/reset", "", resetRequest{Email: "ann@example.com", Code: "WRONGWRONG22", Password: "brand new pass"}, nil)
+	}
+	if status := call(t, "POST", base+"/api/auth/reset", "", resetRequest{Email: "ann@example.com", Code: code, Password: "brand new pass"}, nil); status != http.StatusTooManyRequests {
+		t.Fatalf("too many wrong codes: %d", status)
+	}
+}
+
+func TestForgotNeedsMailAndIsLimited(t *testing.T) {
+	base := useServer(t)
+	if status := call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "ann@example.com"}, nil); status != http.StatusServiceUnavailable {
+		t.Fatalf("a server that cannot send email says so: %d", status)
+	}
+	captureMail(t)
+	if status := call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "not an email"}, nil); status != http.StatusBadRequest {
+		t.Fatalf("bad address: %d", status)
+	}
+	for range resetsPerHour {
+		call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "ann@example.com"}, nil)
+	}
+	if status := call(t, "POST", base+"/api/auth/forgot", "", forgotRequest{Email: "ann@example.com"}, nil); status != http.StatusTooManyRequests {
+		t.Fatalf("a fourth request for one address in an hour: %d", status)
 	}
 }

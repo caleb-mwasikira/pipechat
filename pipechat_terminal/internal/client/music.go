@@ -2,10 +2,11 @@ package client
 
 import (
 	"fmt"
+	tea "github.com/charmbracelet/bubbletea"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"pipechat/internal/client/lookup"
+	"pipechat/internal/client/ui"
 	"strings"
 	"time"
 
@@ -45,22 +46,22 @@ type nowPlaying struct {
 	started time.Time
 }
 
-// showMusic prints the library in the current chat.
-func (m *Model) showMusic(result musicList) {
+// showMusic opens the library as a page, like the help guide: aligned columns, the song that is playing marked,
+// and the commands that go with it. Esc closes it.
+func (m *Model) showMusic(result musicList) tea.Cmd {
 	current := m.groups[m.current]
 	if result.err != nil {
 		m.notice(current, "could not get the music library: "+result.err.Error())
-		return
+		return nil
 	}
-	if len(result.tracks) == 0 {
-		m.notice(current, "the library is empty; upload songs on the website, under Music")
-		return
+	tracks := result.tracks
+	var playing int64
+	if m.playing != nil {
+		playing = m.playing.track.ID
 	}
-	m.notice(current, fmt.Sprintf("Music library (%d). Name a song by its number, its hash (the start is enough) or its name:", len(result.tracks)))
-	m.notice(current, "  /play [SONG]  plays the library from there   /save SONG|all [FOLDER]  keeps a song as a file")
-	for _, track := range result.tracks {
-		m.notice(current, fmt.Sprintf("  #%-3d %s  %s  (%s, @%s)", track.ID, lookup.Short(track.MD5), music.FileName(track), files.FormatSize(track.Size), track.Uploader))
-	}
+	command := m.openPage("music", func(width int) string { return ui.MusicLibrary(width, tracks, playing, m.list.Modes()) })
+	m.pageFooter = "↑/↓ scroll  ·  / search  ·  Esc back  ·  select text to copy  ·  then /play" // after openPage, which clears it
+	return command
 }
 
 // playCommand handles /play and /play SONG, where SONG is a number, the start of a hash, or a name.

@@ -50,7 +50,11 @@ func main() {
 
 	// 3. Screen.
 	screen := client.NewModel(store, *serverURL)
-	program := tea.NewProgram(screen, tea.WithAltScreen())
+	options := []tea.ProgramOption{tea.WithAltScreen()}
+	if !store.MouseOff {
+		options = append(options, tea.WithMouseCellMotion()) // the mouse wheel scrolls (/mouse off turns it off)
+	}
+	program := tea.NewProgram(screen, options...)
 
 	// 4. Server connection. program.Send is how it reaches the screen.
 	screen.Connect(program.Send)

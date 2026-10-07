@@ -12,11 +12,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/smtp"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"pipechat/internal/client/music"
 	"pipechat/internal/client/update"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -32,13 +34,16 @@ import (
 )
 
 const websiteSchema = `
-CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, bio TEXT, created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
+CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, bio TEXT, remember_token TEXT, created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
-CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
+CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMP, updated_at TIMESTAMP, UNIQUE (group_id, user_id));
+CREATE TABLE chat_group_invite_codes (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), code TEXT NOT NULL UNIQUE, uses INT NOT NULL DEFAULT 0, max_uses INT NOT NULL DEFAULT 25, expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP, updated_at TIMESTAMP);
 CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
 CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, uploaded_by BIGINT REFERENCES users(id));
 CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, expires_at TIMESTAMP, created_at TIMESTAMP);
 CREATE TABLE binaries (id BIGSERIAL PRIMARY KEY, os TEXT NOT NULL, arch TEXT NOT NULL, version TEXT NOT NULL, filename TEXT NOT NULL, path TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT NOT NULL, sha256 TEXT NOT NULL);
+CREATE TABLE password_reset_tokens (email TEXT PRIMARY KEY, token TEXT NOT NULL, created_at TIMESTAMP);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id BIGINT);
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
 // terminal is a client Model wired to a real server, with its events pumped by hand.
@@ -133,7 +138,7 @@ func startTestServer(t *testing.T, escrow bool) (url string, pool *sql.DB) {
 	return server.URL, pool
 }
 
-func websiteGroupFlow(t *testing.T, escrow bool) (alice, bob *terminal) {
+func websiteGroupFlow(t *testing.T, escrow bool) (alice, bob *terminal, pool *sql.DB) {
 	serverURL, pool := startTestServer(t, escrow)
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte("correct horse"), bcrypt.MinCost)
@@ -210,12 +215,12 @@ func websiteGroupFlow(t *testing.T, escrow bool) (alice, bob *terminal) {
 	if !delivered {
 		t.Fatal("the website was not told bob has the group")
 	}
-	return alice, bob
+	return alice, bob, pool
 }
 
 // The creator removes a member; the member's terminal drops the group when it next tries to join.
 func TestKickedMemberLosesTheGroup(t *testing.T) {
-	alice, bob := websiteGroupFlow(t, true)
+	alice, bob, _ := websiteGroupFlow(t, true)
 
 	alice.m.input.SetValue("/kick @bob")
 	alice.m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -258,7 +263,7 @@ func (term *terminal) said() string {
 // Messages sent while someone was away are there when they log in again, and what one person
 // has read on a shared computer does not hide messages from the next person.
 func TestMessagesSentWhileAwayArriveAtLogin(t *testing.T) {
-	alice, bob := websiteGroupFlow(t, true)
+	alice, bob, _ := websiteGroupFlow(t, true)
 	url := alice.m.server.URL()
 	bobsStore := bob.m.store
 
@@ -355,7 +360,8 @@ func (term *terminal) waitPlays(played func() []string, count int) {
 func TestStreamingPlaysTheLibraryInOrder(t *testing.T) {
 	term, played, _ := musicSetup(t, "mpv", `echo "$last" >> RECORD; sleep 0.1`)
 	term.run("/music")
-	term.until("the library", func() bool { return strings.Contains(entriesText(term.m.groups[0]), "Song 3") })
+	term.until("the library", func() bool { return term.m.showHelp && strings.Contains(term.m.View(), "Song 3") })
+	term.press("esc")
 
 	term.run("/play")
 	term.until("the queue to finish", func() bool { return strings.Contains(entriesText(term.m.groups[0]), "queue is finished") })
@@ -912,13 +918,23 @@ func TestSongsAreListedWithAHashAndNamedByNumberHashOrName(t *testing.T) {
 	term, played, _ := musicSetup(t, "mpv", `echo "$last" >> RECORD; sleep 0.05`)
 
 	term.run("/music")
-	term.until("the library", term.heard("The Tests - Song 3.mp3"))
-	listing := entriesText(term.m.groups[0])
+	term.until("the library page", func() bool { return term.m.showHelp && term.m.pageTitle == "music" })
+	page := term.m.View()
 	for number := 1; number <= 3; number++ {
-		want := fmt.Sprintf("#%-3d %s  The Tests - Song %d.mp3", number, songHash(number)[:8], number)
-		if !strings.Contains(listing, want) {
-			t.Errorf("the list lacks %q:\n%s", want, listing)
+		for _, want := range []string{fmt.Sprintf("The Tests - Song %d.mp3", number), songHash(number)[:8]} {
+			if !strings.Contains(page, want) {
+				t.Errorf("the library page lacks %q:\n%s", want, page)
+			}
 		}
+	}
+	for _, want := range []string{"♪ Music library", "3 songs", "HASH", "SONG", "SIZE", "ADDED BY", "@alice", "select text to copy"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the library page lacks %q:\n%s", want, page)
+		}
+	}
+	term.press("esc")
+	if term.m.showHelp {
+		t.Fatal("Esc should close the library page")
 	}
 
 	dir := t.TempDir()
@@ -965,10 +981,16 @@ func TestSharedFilesAreListedWithHashesAndDownloadedByAnyOfThem(t *testing.T) {
 	}
 
 	alice.run("/files")
-	alice.until("the list", alice.heard("hello.txt"))
-	listing := entriesText(alice.m.groups[0]) + entriesText(alice.m.groups[1])
-	if !strings.Contains(listing, "#1   "+want[:8]+"  hello.txt") {
-		t.Fatalf("the list should show number, hash and name:\n%s", listing)
+	alice.until("the files page", func() bool { return alice.m.showHelp && alice.m.pageTitle == "files" })
+	page := alice.m.View()
+	for _, wanted := range []string{"Shared files", "1 files", "HASH", "FILE", "hello.txt", want[:8], "you", "/download FILE"} {
+		if !strings.Contains(page, wanted) {
+			t.Fatalf("the files page lacks %q:\n%s", wanted, page)
+		}
+	}
+	alice.press("esc")
+	if alice.m.showHelp {
+		t.Fatal("Esc closes the files page")
 	}
 
 	// By name, number, #number and the start of the hash: each fetches the file, checks its MD5, and says so.
@@ -1061,5 +1083,251 @@ func TestTheServerNamesItsWebsiteBeforeLogin(t *testing.T) {
 	term.until("the server's answer", func() bool { return m.website != "" })
 	if m.website != "https://accounts.example.net" || !strings.Contains(m.authView(), "https://accounts.example.net/register") {
 		t.Fatalf("website %q:\n%s", m.website, m.authView())
+	}
+}
+
+// The creator renames a group on the website; every member's terminal shows the new name, and keeps it.
+func TestARenamedGroupShowsItsNewNameInTerminals(t *testing.T) {
+	alice, bob, pool := websiteGroupFlow(t, true)
+	if bob.m.groups[1].name() != "crew" {
+		t.Fatalf("the group starts as %q", bob.m.groups[1].name())
+	}
+
+	pool.Exec(`UPDATE chat_groups SET name = 'night shift'`)
+	bob.sync()
+	if got := bob.m.groups[1].name(); got != "night shift" {
+		t.Fatalf("after a sync bob sees %q", got)
+	}
+	if !strings.Contains(bob.m.View(), "night shift") || !strings.Contains(entriesText(bob.m.groups[0]), "The group crew is now called night shift") {
+		t.Fatalf("the sidebar and a note should say so:\n%s", bob.m.View())
+	}
+	// The invite code still holds the old name, which is only used when there is nothing newer.
+	if bob.m.groups[1].secret.Name != "crew" || bob.m.vault.Titles[bob.m.groups[1].secret.GIDHex()] != "night shift" {
+		t.Fatal("the new name is kept in the vault, apart from the code")
+	}
+
+	// It is still there after the terminal is closed and opened again.
+	time.Sleep(300 * time.Millisecond) // the vault is saved to the server in the background
+	again := newTerminalWithStore(t, bob.m.server.URL(), "bob@example.com", bob.m.store)
+	if len(again.m.groups) < 2 || again.m.groups[1].name() != "night shift" {
+		t.Fatalf("a new session should open the group under its new name, groups: %d", len(again.m.groups))
+	}
+
+	// Another rename, and renaming back to what the code says, both work.
+	pool.Exec(`UPDATE chat_groups SET name = 'crew'`)
+	alice.sync()
+	if got := alice.m.groups[1].name(); got != "crew" || alice.m.groups[1].title != "" {
+		t.Fatalf("back to the original: %q (title %q)", got, alice.m.groups[1].title)
+	}
+	if len(alice.m.vault.Titles) != 0 {
+		t.Fatalf("no title is kept when the name matches the code: %v", alice.m.vault.Titles)
+	}
+}
+
+// A group keeps its id when it is renamed, also while it is closed: it can still be reopened, by its new name.
+func TestARenamedGroupKeepsItsIdAndAClosedOneIsFoundByTheNewName(t *testing.T) {
+	_, bob, pool := websiteGroupFlow(t, true)
+	gid := bob.m.groups[1].secret.GIDHex()
+
+	bob.run("/groups")
+	bob.until("the list", bob.heard("(id "+gid[:8]+")"))
+
+	bob.run("/close")
+	if len(bob.m.groups) != 1 || len(bob.m.vault.Closed) != 1 || bob.m.vault.Closed[0].Name != "crew" {
+		t.Fatalf("closed: %d chats, %+v", len(bob.m.groups), bob.m.vault.Closed)
+	}
+	pool.Exec(`UPDATE chat_groups SET name = 'night shift'`)
+	bob.sync()
+	if bob.m.vault.Closed[0].Name != "night shift" {
+		t.Fatalf("a closed group follows its new name: %q", bob.m.vault.Closed[0].Name)
+	}
+
+	bob.run("/reopen crew")
+	bob.until("the old name no longer matches", bob.heard("no closed chat called crew"))
+	bob.run(`/reopen "night shift"`)
+	bob.until("the group to come back", func() bool { return len(bob.m.groups) == 2 && !bob.m.groups[1].adding })
+	reopened := bob.m.groups[1]
+	if reopened.name() != "night shift" || reopened.secret.GIDHex() != gid {
+		t.Fatalf("reopened as %q with id %s, wanted the same id %s", reopened.name(), reopened.secret.GIDHex(), gid)
+	}
+}
+
+// ---- the screens before logging in ----
+
+// anonymousTerminal is a terminal that has connected to a server but not logged in.
+func anonymousTerminal(t *testing.T, serverURL string) *terminal {
+	store, _ := LoadStore(filepath.Join(t.TempDir(), "client.json"))
+	m := NewModel(store, "")
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+	term := &terminal{t: t, m: m, messages: make(chan tea.Msg, 100)}
+	m.server = NewServer(serverURL)
+	m.server.report = func(message tea.Msg) { term.messages <- message }
+	m.serverReached, m.online = true, true
+	t.Cleanup(m.server.Stop)
+	return term
+}
+
+// fill types values into the fields of the screen that is showing, in order, and presses Enter after each.
+func (term *terminal) fill(values ...string) {
+	for _, value := range values {
+		field := term.m.fields()[term.m.focus]
+		field.SetValue(value)
+		term.m.updateAuth(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+}
+
+func (term *terminal) ctrl(key tea.KeyType) { term.m.updateAuth(tea.KeyMsg{Type: key}) }
+
+func TestMakingAnAccountFromTheTerminalAndLoggingStraightIn(t *testing.T) {
+	serverURL, pool := startTestServer(t, false)
+	term := anonymousTerminal(t, serverURL)
+
+	term.ctrl(tea.KeyCtrlR)
+	view := term.m.authView()
+	for _, want := range []string{"Create your account", "Your name", "Handle (what others see", "Email", "Password (8 or more", "Repeat the password", "Esc back to log in"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("the register screen lacks %q:\n%s", want, view)
+		}
+	}
+
+	// Mistakes are told at once, without asking the server.
+	for _, c := range []struct {
+		values []string
+		says   string
+	}{
+		{[]string{"", "ann_e", "ann@example.com", "correct horse", "correct horse"}, "enter your name"},
+		{[]string{"Ann", "A", "ann@example.com", "correct horse", "correct horse"}, "3-20 characters"},
+		{[]string{"Ann", "ann_e", "not-an-email", "correct horse", "correct horse"}, "email address"},
+		{[]string{"Ann", "ann_e", "ann@example.com", "short", "short"}, "at least 8"},
+		{[]string{"Ann", "ann_e", "ann@example.com", "correct horse", "correct hors"}, "not the same"},
+	} {
+		term.m.goToAuth(modeRegister)
+		term.m.emailInput.SetValue("")
+		term.m.focusField(0)
+		term.fill(c.values...)
+		if !strings.Contains(term.m.authError, c.says) || term.m.authBusy {
+			t.Fatalf("%v should say %q, got %q", c.values, c.says, term.m.authError)
+		}
+	}
+	var users int
+	pool.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users)
+	if users != 0 {
+		t.Fatal("nothing reached the server")
+	}
+
+	// The real thing: the account is made, and the same screen logs in with it.
+	term.m.goToAuth(modeRegister)
+	term.m.emailInput.SetValue("")
+	term.m.focusField(0)
+	term.fill("Ann Example", "ann_e", "Ann@Example.com", "correct horse", "correct horse")
+	term.until("the new account to be logged in", func() bool { return term.m.loggedIn })
+	if term.m.session.handle != "ann_e" {
+		t.Fatalf("logged in as %q", term.m.session.handle)
+	}
+	var name, email string
+	pool.QueryRow(`SELECT name, email FROM users WHERE handle = 'ann_e'`).Scan(&name, &email)
+	if name != "Ann Example" || email != "ann@example.com" {
+		t.Fatalf("the account: %q %q", name, email)
+	}
+
+	// A handle or email that is taken comes back as an answer on the same screen, and nothing is lost.
+	again := anonymousTerminal(t, serverURL)
+	again.ctrl(tea.KeyCtrlR)
+	again.fill("Someone Else", "ann_e", "other@example.com", "correct horse", "correct horse")
+	again.until("the server's answer", func() bool { return again.m.authError != "" })
+	if !strings.Contains(again.m.authError, "handle is taken") || again.m.authMode != modeRegister || again.m.nameInput.Value() != "Someone Else" {
+		t.Fatalf("a taken handle: %q (screen %q, name kept %q)", again.m.authError, again.m.authMode, again.m.nameInput.Value())
+	}
+	again.ctrl(tea.KeyEsc)
+	if again.m.authMode != modeLogin || again.m.passwordInput.Value() != "" {
+		t.Fatal("Esc goes back to the login screen, with no password left in it")
+	}
+}
+
+func TestResettingAForgottenPasswordFromTheTerminal(t *testing.T) {
+	serverURL, pool := startTestServer(t, false)
+	hash, _ := bcrypt.GenerateFromPassword([]byte("old password"), bcrypt.MinCost)
+	pool.Exec(`INSERT INTO users (handle, name, email, password) VALUES ('annie', 'Annie', 'annie@example.com', $1)`, string(hash))
+
+	mails := make(chan string, 5)
+	restore := handlers.SetMailSender(func(address string, a smtp.Auth, from string, to []string, message []byte) error {
+		mails <- string(message)
+		return nil
+	})
+	defer restore()
+	handlers.Config.SMTPHost, handlers.Config.SMTPPort, handlers.Config.SMTPFrom = "smtp.test", "587", "Pipechat <noreply@example.com>"
+
+	term := anonymousTerminal(t, serverURL)
+	term.ctrl(tea.KeyCtrlF)
+	if view := term.m.authView(); !strings.Contains(view, "Reset your password") || !strings.Contains(view, "I already have a code") {
+		t.Fatalf("the forgot screen:\n%s", view)
+	}
+	term.fill("annie@example.com")
+
+	// The code arrives by email, and the screen moves on to asking for it.
+	var body string
+	select {
+	case body = <-mails:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no email arrived")
+	}
+	term.until("the code screen", func() bool { return term.m.authMode == modeReset })
+	code := regexp.MustCompile(`[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}`).FindString(body)
+	if code == "" || term.m.emailInput.Value() != "annie@example.com" || !strings.Contains(term.m.authView(), "a code is on its way") {
+		t.Fatalf("code %q, email kept %q:\n%s", code, term.m.emailInput.Value(), term.m.authView())
+	}
+	if !strings.Contains(term.m.authView(), "start with new keys") {
+		t.Fatal("the reset screen warns that the saved keys start over")
+	}
+
+	// A wrong code, and then the right one, with the new password typed twice.
+	term.m.focusField(0)
+	term.fill("annie@example.com", "AAAA-BBBB-CCCC", "brand new pass", "brand new pass")
+	term.until("the refusal", func() bool { return term.m.authError != "" })
+	if !strings.Contains(term.m.authError, "wrong or has expired") || term.m.authMode != modeReset {
+		t.Fatalf("a wrong code: %q", term.m.authError)
+	}
+	term.m.focusField(1)
+	term.fill(strings.ToLower(code), "brand new pass", "brand new pass")
+	term.until("back at the login screen", func() bool {
+		return term.m.authMode == modeLogin && strings.Contains(term.m.authNotice, "Password changed")
+	})
+	if term.m.emailInput.Value() != "annie@example.com" || term.m.passwordInput.Value() != "" {
+		t.Fatal("the email is filled in for the login, and no password is kept")
+	}
+
+	// The new password logs in; the old one does not.
+	term.m.focusField(0)
+	term.fill("annie@example.com", "brand new pass")
+	term.until("logged in", func() bool { return term.m.loggedIn })
+	old := anonymousTerminal(t, serverURL)
+	old.m.focusField(0)
+	old.fill("annie@example.com", "old password")
+	old.until("the refusal", func() bool { return old.m.authError != "" })
+}
+
+func TestTheAccountScreensKeepToTheirRoutes(t *testing.T) {
+	serverURL, _ := startTestServer(t, false)
+	term := anonymousTerminal(t, serverURL)
+
+	term.ctrl(tea.KeyCtrlF)
+	term.ctrl(tea.KeyCtrlT) // I already have a code
+	if term.m.authMode != modeReset {
+		t.Fatal("Ctrl+T on the forgot screen goes to the code screen")
+	}
+	term.ctrl(tea.KeyEsc)
+	if term.m.authMode != modeLogin {
+		t.Fatal("Esc goes back")
+	}
+	term.ctrl(tea.KeyCtrlT) // only on the forgot screen
+	if term.m.authMode != modeLogin {
+		t.Fatal("Ctrl+T does nothing on the login screen")
+	}
+	// A server that cannot send mail says so instead of pretending.
+	term.ctrl(tea.KeyCtrlF)
+	term.fill("someone@example.com")
+	term.until("the server's answer", func() bool { return term.m.authError != "" })
+	if !strings.Contains(term.m.authError, "cannot send email") || term.m.authMode != modeForgot {
+		t.Fatalf("no mail set up: %q", term.m.authError)
 	}
 }

@@ -81,3 +81,84 @@ func TestChatMatches(t *testing.T) {
 		}
 	}
 }
+
+func TestPageMatchesSkipStylesAndUseSmartCase(t *testing.T) {
+	page := "\x1b[1mHELP\x1b[0m guide\n  /play SONG   play the \x1b[36mlibrary\x1b[0m\n  /Save NUMBER  keep a song\nnothing here"
+	if got := PageMatches(page, "song"); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("lower case ignores capitals: %v", got)
+	}
+	if got := PageMatches(page, "SONG"); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("a capital makes it exact: %v", got)
+	}
+	if got := PageMatches(page, "library"); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("text inside colour codes is found: %v", got)
+	}
+	if got := PageMatches(page, "\x1b[36m"); len(got) != 0 {
+		t.Fatalf("the colour codes themselves are not text: %v", got)
+	}
+	if len(PageMatches(page, "")) != 0 || len(PageMatches(page, "zzz")) != 0 {
+		t.Fatal("no pattern and no match find nothing")
+	}
+}
+
+func TestPageHighlightMarksEveryMatchAndKeepsTheStyles(t *testing.T) {
+	mark := func(s string) string { return "[" + s + "]" }
+	strong := func(s string) string { return "{" + s + "}" }
+	page := "song one, SONG two\n\x1b[36mthe song\x1b[0m\nplain"
+
+	got := PageHighlight(page, "song", 0, mark, strong)
+	lines := strings.Split(got, "\n")
+	if lines[0] != "{song} one, {SONG} two" {
+		t.Fatalf("the line looked at uses the strong mark, on every match: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "[song]") || !strings.Contains(lines[1], "\x1b[36m") || ansiPlain(lines[1]) != "the [song]" {
+		t.Fatalf("other lines get the plain mark and keep their colour: %q", lines[1])
+	}
+	if lines[2] != "plain" {
+		t.Fatalf("lines with no match are left as they are: %q", lines[2])
+	}
+	if PageHighlight(page, "", 0, mark, strong) != page {
+		t.Fatal("no pattern, no change")
+	}
+	// Wide characters count as two columns, so the mark lands on the right text.
+	wide := PageHighlight("日本語 song 日本語", "song", -1, mark, strong)
+	if wide != "日本語 [song] 日本語" {
+		t.Fatalf("wide characters: %q", wide)
+	}
+}
+
+func ansiPlain(s string) string {
+	var out strings.Builder
+	skipping := false
+	for _, r := range s {
+		switch {
+		case r == 0x1b:
+			skipping = true
+		case skipping && r == 'm':
+			skipping = false
+		case !skipping:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+func TestStepAndFirstFromWrapRoundLikeVim(t *testing.T) {
+	matches := []int{3, 10, 40}
+	for _, c := range []struct{ at, dir, want int }{{0, 1, 1}, {2, 1, 0}, {0, -1, 2}, {1, -1, 0}} {
+		if got := Step(matches, c.at, c.dir); got != c.want {
+			t.Errorf("Step(%d, %d) = %d, want %d", c.at, c.dir, got, c.want)
+		}
+	}
+	if Step(nil, 0, 1) != -1 {
+		t.Error("no matches, no step")
+	}
+	for top, want := range map[int]int{0: 0, 3: 0, 4: 1, 11: 2, 41: 0} {
+		if got := FirstFrom(matches, top); got != want {
+			t.Errorf("FirstFrom(%d) = %d, want %d", top, got, want)
+		}
+	}
+	if FirstFrom(nil, 5) != -1 {
+		t.Error("nothing to start from")
+	}
+}
