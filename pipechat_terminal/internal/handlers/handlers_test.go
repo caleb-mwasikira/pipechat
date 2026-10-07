@@ -985,10 +985,10 @@ func TestRegisteringFromTheTerminal(t *testing.T) {
 	if status, failure := register(t, base, good); status != http.StatusCreated {
 		t.Fatalf("register: %d %+v", status, failure)
 	}
-	// The account is the website's: its row, with a bcrypt hash the website can check, and the email in lower case.
+	// The account is the website's: its row, with a bcrypt hash the website can check (Laravel only accepts the $2y$ spelling), and the email in lower case.
 	var name, handle, email, hash string
 	Pool.QueryRow(`SELECT name, handle, email, password FROM users WHERE handle = 'ann_e'`).Scan(&name, &handle, &email, &hash)
-	if name != "Ann Example" || email != "ann@example.com" || !strings.HasPrefix(hash, "$2a$") || strings.Contains(hash, "correct horse") {
+	if name != "Ann Example" || email != "ann@example.com" || !strings.HasPrefix(hash, "$2y$") || strings.Contains(hash, "correct horse") {
 		t.Fatalf("stored: %q %q %q", name, email, hash)
 	}
 	// It logs in straight away, with the email and password just chosen.
@@ -1092,6 +1092,11 @@ func TestResettingAPasswordWithACodeFromTheEmail(t *testing.T) {
 		t.Fatalf("the right code: %d", status)
 	}
 
+	var stored string
+	Pool.QueryRow(`SELECT password FROM users WHERE email = 'ann@example.com'`).Scan(&stored)
+	if !strings.HasPrefix(stored, "$2y$") {
+		t.Fatalf("a reset password must be written the way Laravel reads it ($2y$): %.7s", stored)
+	}
 	var response authResponse
 	if status := call(t, "POST", base+"/api/auth/login", "", authRequest{Email: "ann@example.com", Password: "brand new pass"}, &response); status != 200 {
 		t.Fatalf("the new password should log in: %d", status)

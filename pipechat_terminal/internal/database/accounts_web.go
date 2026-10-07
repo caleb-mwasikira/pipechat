@@ -17,6 +17,15 @@ var (
 	ErrHandleTaken = errors.New("that handle is taken")
 )
 
+// laravelHash spells a bcrypt hash the way Laravel does. Go writes the version as $2a$, but Laravel's hasher only
+// accepts $2y$ (the same algorithm) and refuses to check anything else, so the website could not log the person in.
+func laravelHash(hash string) string {
+	if strings.HasPrefix(hash, "$2a$") {
+		return "$2y$" + hash[len("$2a$"):]
+	}
+	return hash
+}
+
 const utcNow = "(now() AT TIME ZONE 'UTC')"
 
 // CreateWebUser adds a user. passwordHash is a bcrypt hash.
@@ -39,7 +48,7 @@ func CreateWebUser(ctx context.Context, pool *sql.DB, name string, handle string
 	}
 	if _, err := transaction.ExecContext(ctx,
 		`INSERT INTO users (name, handle, email, password, created_at, updated_at) VALUES ($1, $2, $3, $4, `+utcNow+`, `+utcNow+`)`,
-		name, handle, email, passwordHash); err != nil {
+		name, handle, email, laravelHash(passwordHash)); err != nil {
 		// Two people registering at once: the unique index says which one lost.
 		if strings.Contains(err.Error(), "users_email_unique") {
 			return ErrEmailTaken
@@ -89,7 +98,7 @@ func ResetPassword(ctx context.Context, pool *sql.DB, email string, passwordHash
 	var userID int64
 	if err := transaction.QueryRowContext(ctx,
 		`UPDATE users SET password = $1, remember_token = NULL, updated_at = `+utcNow+` WHERE lower(email) = lower($2) RETURNING id`,
-		passwordHash, email).Scan(&userID); err != nil {
+		laravelHash(passwordHash), email).Scan(&userID); err != nil {
 		return err
 	}
 	if _, err := transaction.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE email = $1`, email); err != nil {
