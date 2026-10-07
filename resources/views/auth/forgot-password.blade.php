@@ -2,7 +2,6 @@
 @section('title', 'Forgot password')
 @section('content')
 <x-card icon="fa-envelope">
-    <x-status />
     <form method="POST" action="{{ route('password.email') }}" class="space-y-4">
         @csrf
         <x-heading title="RESET PASSWORD" sub="We'll email you a link to choose a new one." />

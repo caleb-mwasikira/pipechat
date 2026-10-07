@@ -11,6 +11,9 @@ import (
 //
 //	POST   /api/auth/login              website email + password -> token, vault (auth.go)
 //	GET    /api/files/{id}              download an encrypted file            (files.go)
+//	GET    /api/info                    where to register                      (info.go)
+//	GET    /api/version?os=&arch=       the newest client for a system         (update.go)
+//	GET    /api/update/{id}             download that client                   (update.go)
 //
 // Everything below needs "Authorization: Bearer <token>":
 //
@@ -54,6 +57,9 @@ func Routes() http.Handler {
 	router.Route("/api", func(api chi.Router) {
 		api.Post("/auth/login", login)
 		api.Get("/files/{id}", downloadFile)
+		api.Get("/info", serverInfo)
+		api.Get("/version", latestVersion)
+		api.Get("/update/{id}", updateFile)
 
 		api.Group(func(api chi.Router) {
 			api.Use(requireLogin)

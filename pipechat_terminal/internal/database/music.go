@@ -14,14 +14,15 @@ type Track struct {
 	Ext      string `json:"ext"`
 	Size     int64  `json:"size"`
 	Uploader string `json:"uploader"`
+	MD5      string `json:"md5"`
 	Path     string `json:"-"` // under the website's storage/app/private folder
 }
 
-const trackColumns = `t.id, t.title, COALESCE(t.artist, ''), t.extension, t.size, COALESCE(u.handle, ''), t.path`
+const trackColumns = `t.id, t.title, COALESCE(t.artist, ''), t.extension, t.size, COALESCE(u.handle, ''), COALESCE(t.md5, ''), t.path`
 
 func scanTrack(row interface{ Scan(...any) error }) (Track, error) {
 	var t Track
-	err := row.Scan(&t.ID, &t.Title, &t.Artist, &t.Ext, &t.Size, &t.Uploader, &t.Path)
+	err := row.Scan(&t.ID, &t.Title, &t.Artist, &t.Ext, &t.Size, &t.Uploader, &t.MD5, &t.Path)
 	return t, err
 }
 

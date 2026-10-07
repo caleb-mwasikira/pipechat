@@ -99,5 +99,18 @@
             <span><span class="text-cyber-neon">$</span> exit 0</span>
         </div>
     </footer>
+    {{-- Messages from the last action show as toasts that fade by themselves. --}}
+    @php
+        $flash = collect(['status' => 'success', 'error' => 'error'])
+            ->map(fn ($type, $key) => session($key) ? ['type' => $type, 'message' => session($key)] : null)
+            ->filter()->values();
+    @endphp
+    <div id="toasts" class="pointer-events-none fixed right-4 top-4 z-[80] flex w-[calc(100vw-2rem)] max-w-sm flex-col gap-3" role="region" aria-label="Notifications" aria-live="polite"></div>
+    <script type="application/json" id="flash-messages">@json($flash)</script>
+    <noscript>
+        @foreach ($flash as $item)
+            <p class="fixed right-4 top-4 z-[80] max-w-sm border-l-4 {{ $item['type'] === 'error' ? 'border-red-400' : 'border-cyber-neon' }} bg-cyber-800 px-4 py-3 font-mono text-xs text-white">{{ $item['message'] }}</p>
+        @endforeach
+    </noscript>
 </body>
 </html>

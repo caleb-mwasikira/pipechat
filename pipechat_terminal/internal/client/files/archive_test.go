@@ -4,9 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/md5"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -43,13 +46,13 @@ func TestFolderRoundTrip(t *testing.T) {
 	key, _, _ := crypto.NewFileKey()
 	var sealed bytes.Buffer
 	var packed atomic.Int64
-	count, err := WriteArchive(&sealed, source, key, &packed)
+	count, packedHash, err := WriteArchive(&sealed, source, key, &packed)
 	if err != nil || count != 2 {
 		t.Fatalf("pack: %d %v", count, err)
 	}
 
 	target := t.TempDir()
-	entries, total, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, target)
+	entries, total, hash, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, target, "")
 	if err != nil || !reflect.DeepEqual(entries, []string{"photos"}) || total != 200005 {
 		t.Fatalf("extract: %v %d %v", entries, total, err)
 	}
@@ -59,9 +62,25 @@ func TestFolderRoundTrip(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(target, "photos", "link")); err == nil {
 		t.Fatal("symlink was shared")
 	}
+	if len(packedHash) != 32 || hash != packedHash {
+		t.Fatalf("both ends should agree on the folder's hash: packed %q, unpacked %q", packedHash, hash)
+	}
+
+	// With the right hash it passes; with a wrong one nothing is written.
+	other := t.TempDir()
+	if _, _, _, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, other, strings.ToUpper(packedHash)); err != nil {
+		t.Fatalf("the right hash was refused: %v", err)
+	}
+	wrong := t.TempDir()
+	if _, _, _, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, wrong, strings.Repeat("0", 32)); err == nil || !strings.Contains(err.Error(), "does not match its MD5") {
+		t.Fatalf("a wrong hash must be refused: %v", err)
+	}
+	if left, _ := os.ReadDir(wrong); len(left) != 0 {
+		t.Fatalf("a failed check left files behind: %v", left)
+	}
 
 	// Downloading again must not overwrite.
-	if _, _, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, target); err == nil {
+	if _, _, _, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, target, ""); err == nil {
 		t.Fatal("existing folder overwritten")
 	}
 	left, _ := os.ReadDir(target)
@@ -79,7 +98,7 @@ func TestUnsafeArchivesRejected(t *testing.T) {
 		})
 		parent := t.TempDir()
 		target := filepath.Join(parent, "out")
-		if _, _, err := ExtractArchive(bytes.NewReader(sealed), key, target); err == nil {
+		if _, _, _, err := ExtractArchive(bytes.NewReader(sealed), key, target, ""); err == nil {
 			t.Fatalf("%q accepted", name)
 		}
 		if _, err := os.Stat(filepath.Join(parent, "evil")); err == nil {
@@ -93,7 +112,7 @@ func TestUnsafeArchivesRejected(t *testing.T) {
 		archive.Write(bytes.Repeat([]byte("z"), 300000))
 	})
 	target := t.TempDir()
-	if _, _, err := ExtractArchive(bytes.NewReader(sealed[:len(sealed)/2]), key, target); err == nil {
+	if _, _, _, err := ExtractArchive(bytes.NewReader(sealed[:len(sealed)/2]), key, target, ""); err == nil {
 		t.Fatal("truncated archive accepted")
 	}
 	if left, _ := os.ReadDir(target); len(left) != 0 {
@@ -111,5 +130,31 @@ func TestParseLink(t *testing.T) {
 		if _, _, err := ParseLink(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+// A single file's hash is the one "md5sum" prints for it, so people can check it themselves.
+func TestASingleFileIsHashedByItsOwnBytes(t *testing.T) {
+	content := bytes.Repeat([]byte("hello hash\n"), 5000)
+	source := filepath.Join(t.TempDir(), "notes.txt")
+	os.WriteFile(source, content, 0o644)
+	sum := md5.Sum(content)
+	want := hex.EncodeToString(sum[:])
+
+	key, _, _ := crypto.NewFileKey()
+	var sealed bytes.Buffer
+	var packed atomic.Int64
+	_, hash, err := WriteArchive(&sealed, source, key, &packed)
+	if err != nil || hash != want {
+		t.Fatalf("packed hash %q, md5sum says %q (%v)", hash, want, err)
+	}
+	target := t.TempDir()
+	entries, _, got, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, target, want)
+	if err != nil || got != want || !reflect.DeepEqual(entries, []string{"notes.txt"}) {
+		t.Fatalf("unpacked hash %q (%v) %v", got, err, entries)
+	}
+	// A sender who lies about the hash is caught.
+	if _, _, _, err := ExtractArchive(bytes.NewReader(sealed.Bytes()), key, t.TempDir(), strings.Repeat("a", 32)); err == nil {
+		t.Fatal("a wrong hash for a file must be refused")
 	}
 }

@@ -105,4 +105,5 @@ type shareRequest struct {
 	GID  string `json:"gid"`
 	Name string `json:"name"`
 	Size int64  `json:"size"`
+	MD5  string `json:"md5"`
 }

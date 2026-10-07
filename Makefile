@@ -6,10 +6,11 @@
 #   make checksums          print the MD5 of everything in dist/
 #   make test | clean
 
-VERSION ?= 0.2.0
+VERSION ?= 1.2.0
 DIST    := dist
 SRC     := pipechat_terminal
-GOFLAGS := -trimpath -ldflags "-s -w"
+# The version is built into the program, which is how it knows whether a newer one has been published.
+GOFLAGS := -trimpath -ldflags "-s -w -X pipechat/internal/client/update.Current=$(VERSION)"
 
 # Static binaries: no C compiler or runtime libraries needed on the target.
 GOBUILD = cd $(SRC) && CGO_ENABLED=0 GOOS=$(1) GOARCH=$(2) go build $(GOFLAGS) -o ../$(DIST)/pipechat-$(VERSION)-$(3) ./cmd/chat

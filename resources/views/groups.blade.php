@@ -9,7 +9,6 @@
     </div>
     <button type="button" data-open-modal="create-group" class="bg-cyber-neon px-4 py-2.5 font-mono text-xs font-bold uppercase tracking-wider text-black transition-all hover:bg-emerald-400 neon-glow-green"><i class="fa-solid fa-plus mr-2"></i>Create group</button>
 </div>
-<x-status />
 @if ($errors->has('join'))<p class="mb-4 text-xs text-cyber-danger">{{ $errors->first('join') }}</p>@endif
 
 @if ($invites->isNotEmpty())

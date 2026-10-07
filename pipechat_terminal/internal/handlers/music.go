@@ -2,8 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -50,32 +48,9 @@ func musicFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The path comes from the database, but never trust it to stay inside the storage folder.
-	root, err := filepath.Abs(Config.StorageDir)
-	if err != nil {
-		serverError(w, "music folder", err)
-		return
-	}
-	full := filepath.Join(root, filepath.Clean("/"+track.Path))
-	if !strings.HasPrefix(full, root+string(filepath.Separator)) {
-		writeError(w, http.StatusNotFound, "no such track")
-		return
-	}
-	file, err := os.Open(full)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "the file for this track is missing")
-		return
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || info.IsDir() {
-		writeError(w, http.StatusNotFound, "the file for this track is missing")
-		return
-	}
 	contentType := audioTypes[strings.ToLower(track.Ext)]
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	w.Header().Set("Content-Type", contentType)
-	http.ServeContent(w, r, "", info.ModTime(), file)
+	serveStored(w, r, track.Path, contentType, "")
 }

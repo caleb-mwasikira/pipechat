@@ -33,3 +33,10 @@ func Truncate(text string, width int) string {
 	}
 	return string(runes[:max(1, width-1)]) + "…"
 }
+
+// Link is text that is a clickable link in terminals that support them (an OSC 8 link), and just underlined
+// text in the rest, which ignore the codes.
+func Link(address string, text string) string {
+	shown := lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color("87")).Render(text)
+	return "\x1b]8;;" + address + "\x1b\\" + shown + "\x1b]8;;\x1b\\"
+}

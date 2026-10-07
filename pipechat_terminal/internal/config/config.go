@@ -22,6 +22,9 @@ type Config struct {
 	// EscrowKey (CHAT_ESCROW_KEY, 64 hex characters) lets the server hold website groups' keys so
 	// invitees get in at once. Empty turns that off: keys then pass from member to member.
 	EscrowKey []byte
+	// WebsiteURL (CHAT_WEBSITE_URL, or the site's APP_URL) is where people register; the terminal shows it on
+	// its login screen. Empty means the website is at the same address as this server.
+	WebsiteURL string
 	// StorageDir is the website's storage/app/private folder, where uploaded music lives.
 	StorageDir string
 	TLSCert    string
@@ -67,6 +70,7 @@ func Load() (*Config, error) {
 		Port:           get("CHAT_PORT", "7777"),
 		DatabaseURL:    databaseURL(),
 		StorageDir:     get("CHAT_STORAGE_DIR", "../storage/app/private"),
+		WebsiteURL:     websiteURL(get("CHAT_WEBSITE_URL", get("APP_URL", ""))),
 		TLSCert:        get("CHAT_TLS_CERT", ""),
 		TLSKey:         get("CHAT_TLS_KEY", ""),
 		SMTPHost:       get("SMTP_HOST", ""),
@@ -129,4 +133,21 @@ func loadDotEnv(path string) {
 			os.Setenv(key, value)
 		}
 	}
+}
+
+// websiteURL tidies an address typed without its scheme: a plain domain means https://, while localhost, an IP
+// address or one with a port means http://, the way a site run by hand answers.
+func websiteURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" || strings.Contains(raw, "://") {
+		return raw
+	}
+	parsed, err := url.Parse("//" + raw)
+	if err != nil || parsed.Hostname() == "" {
+		return ""
+	}
+	if parsed.Port() == "" && strings.Contains(parsed.Hostname(), ".") && net.ParseIP(parsed.Hostname()) == nil {
+		return "https://" + raw
+	}
+	return "http://" + raw
 }

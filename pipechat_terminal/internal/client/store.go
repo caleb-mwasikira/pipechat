@@ -14,10 +14,11 @@ import (
 // each chat (sealed, see history.go). Secrets are not in it: the group codes live in the account's encrypted
 // vault on the server.
 type Store struct {
-	path      string
-	ServerURL string       `json:"server_url"` // the chat server connected to last time
-	LastEmail string       `json:"last_email"` // pre-fills the login screen
-	History   *history.Log `json:"-"`          // the messages shown in each chat, kept between runs (history.jsonl)
+	path           string
+	ServerURL      string       `json:"server_url"`      // the chat server connected to last time
+	SkippedVersion string       `json:"skipped_version"` // an update the person said no to for good
+	LastEmail      string       `json:"last_email"`      // pre-fills the login screen
+	History        *history.Log `json:"-"`               // the messages shown in each chat, kept between runs (history.jsonl)
 }
 
 // DefaultStorePath is ~/.config/pipechat/client.json (or the platform equivalent).

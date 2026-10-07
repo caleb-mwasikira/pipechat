@@ -33,7 +33,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile');
     Route::put('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::get('/music', [MusicController::class, 'index'])->name('music');
-    Route::post('/music', [MusicController::class, 'store'])->middleware('throttle:20,10')->name('music.store');
+    Route::post('/music', [MusicController::class, 'store'])->middleware('throttle:300,10')->name('music.store');
     Route::get('/music/{track}/audio', [MusicController::class, 'audio'])->whereNumber('track')->name('music.audio');
     Route::delete('/music/{track}', [MusicController::class, 'destroy'])->whereNumber('track')->name('music.destroy');
     Route::redirect('/dashboard', '/groups')->name('dashboard');

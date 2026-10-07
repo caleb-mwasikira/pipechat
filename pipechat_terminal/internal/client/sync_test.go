@@ -3,14 +3,21 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"pipechat/internal/client/music"
+	"pipechat/internal/client/update"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,8 +36,9 @@ CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', han
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
 CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
-CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, uploaded_by BIGINT REFERENCES users(id));
-CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, expires_at TIMESTAMP, created_at TIMESTAMP);
+CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, uploaded_by BIGINT REFERENCES users(id));
+CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, expires_at TIMESTAMP, created_at TIMESTAMP);
+CREATE TABLE binaries (id BIGSERIAL PRIMARY KEY, os TEXT NOT NULL, arch TEXT NOT NULL, version TEXT NOT NULL, filename TEXT NOT NULL, path TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT NOT NULL, sha256 TEXT NOT NULL);
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
 // terminal is a client Model wired to a real server, with its events pumped by hand.
@@ -298,8 +306,9 @@ func musicSetup(t *testing.T, playerName string, script string) (*terminal, func
 		song := bytes.Repeat([]byte{byte('a' + number)}, 100*number)
 		name := fmt.Sprintf("music/%d.mp3", number)
 		os.WriteFile(filepath.Join(handlers.Config.StorageDir, name), song, 0o644)
-		pool.Exec(`INSERT INTO tracks (title, artist, path, extension, size, uploaded_by) VALUES ($1, 'The Tests', $2, 'mp3', $3, $4)`,
-			fmt.Sprintf("Song %d", number), name, len(song), userID)
+		sum := md5.Sum(song)
+		pool.Exec(`INSERT INTO tracks (title, artist, path, extension, size, md5, uploaded_by) VALUES ($1, 'The Tests', $2, 'mp3', $3, $4, $5)`,
+			fmt.Sprintf("Song %d", number), name, len(song), hex.EncodeToString(sum[:]), userID)
 	}
 
 	bin := t.TempDir()
@@ -651,5 +660,406 @@ func TestConfirmingThePreviewUploads(t *testing.T) {
 	}
 	if !strings.Contains(entriesText(alice.m.groups[1]), `uploaded "hello.txt"`) {
 		t.Fatalf("the upload should finish:\n%s", entriesText(alice.m.groups[1]))
+	}
+}
+
+// ---- updating the program ----
+
+// aProgramFor is bytes that pass for a program on the system running the test.
+func aProgramFor(payload string) []byte {
+	switch runtime.GOOS {
+	case "windows":
+		return append([]byte("MZ\x90\x00"), payload...)
+	case "darwin":
+		return append([]byte("\xcf\xfa\xed\xfe"), payload...)
+	}
+	return append([]byte("\x7fELF"), payload...)
+}
+
+// publishRelease puts a new client on the server the way the website's upload page does.
+func publishRelease(t *testing.T, pool *sql.DB, version string, program []byte, checksumOverride string) {
+	osName, arch, ok := update.Platform()
+	if !ok {
+		t.Skip("no downloads for this system")
+	}
+	relative := "downloads/pipechat-" + version
+	os.MkdirAll(filepath.Join(handlers.Config.StorageDir, "downloads"), 0o755)
+	os.WriteFile(filepath.Join(handlers.Config.StorageDir, relative), program, 0o755)
+	sum := sha256.Sum256(program)
+	hash := hex.EncodeToString(sum[:])
+	if checksumOverride != "" {
+		hash = checksumOverride
+	}
+	if _, err := pool.Exec(`INSERT INTO binaries (os, arch, version, filename, path, size, md5, sha256) VALUES ($1, $2, $3, $4, $5, $6, 'x', $7)`,
+		osName, arch, version, "pipechat-"+version, relative, len(program), hash); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// drive runs what the screen asked to be done, and gives the results back to it, until nothing is left. It
+// returns whether the screen asked to quit.
+func (term *terminal) drive(command tea.Cmd) (quit bool) {
+	term.t.Helper()
+	var run func(tea.Cmd)
+	run = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		switch message := c().(type) {
+		case nil:
+		case tea.BatchMsg:
+			for _, inner := range message {
+				run(inner)
+			}
+		case tea.QuitMsg:
+			quit = true
+		default:
+			_, next := term.m.Update(message)
+			run(next)
+		}
+	}
+	run(command)
+	return quit
+}
+
+func (term *terminal) press(key string) tea.Cmd {
+	var message tea.KeyMsg
+	switch key {
+	case "esc":
+		message = tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		message = tea.KeyMsg{Type: tea.KeyEnter}
+	default:
+		message = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+	}
+	_, command := term.m.Update(message)
+	return command
+}
+
+// updateSetup runs a server with one user, makes this program claim to be version running, and points the
+// updater at a stand-in file rather than the test program itself. It returns the server, its database and
+// the stand-in's path.
+func updateSetup(t *testing.T, running string) (url string, pool *sql.DB, exe string) {
+	previous := update.Current
+	update.Current = running
+	t.Cleanup(func() { update.Current = previous })
+
+	url, pool = startTestServer(t, false)
+	hash, _ := bcrypt.GenerateFromPassword([]byte("correct horse"), bcrypt.MinCost)
+	pool.Exec(`INSERT INTO users (handle, name, email, password) VALUES ('alice', 'alice', 'alice@example.com', $1)`, string(hash))
+
+	exe = filepath.Join(t.TempDir(), "pipechat")
+	os.WriteFile(exe, aProgramFor("old"), 0o755)
+	previousExecutable := executable
+	executable = func() (string, error) { return exe, nil }
+	t.Cleanup(func() { executable = previousExecutable })
+	return url, pool, exe
+}
+
+func TestANewVersionIsOfferedAndInstalled(t *testing.T) {
+	serverURL, pool, exe := updateSetup(t, "1.0.0")
+	newProgram := aProgramFor(strings.Repeat("new version ", 3000))
+	publishRelease(t, pool, "1.9.0", aProgramFor("an older build"), "")
+	publishRelease(t, pool, "1.10.0", newProgram, "") // newest, though "1.9.0" sorts after it as text
+
+	term := newTerminal(t, serverURL, "alice@example.com")
+	term.until("the offer", func() bool { return term.m.pendingUpdate != nil && term.m.showHelp })
+	view := term.m.View()
+	for _, want := range []string{"A new version of Pipechat is ready", "v1.0.0", "v1.10.0", "update now", "skip this version", "Y update now"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the offer lacks %q:\n%s", want, view)
+		}
+	}
+
+	// Yes: it downloads, installs, and asks the screen to close so the new program can start.
+	quit := term.drive(term.press("y"))
+	if !quit || term.m.RestartExe() != exe {
+		t.Fatalf("after updating the screen should close and name the program: quit %v, restart %q\n%s", quit, term.m.RestartExe(), entriesText(term.m.groups[0]))
+	}
+	if got, _ := os.ReadFile(exe); !bytes.Equal(got, newProgram) {
+		t.Fatalf("the program was not replaced (%d bytes)", len(got))
+	}
+	if term.m.busy {
+		t.Fatal("the transfer should be over")
+	}
+}
+
+func TestSayingNoOrSkipLeavesTheProgramAlone(t *testing.T) {
+	serverURL, pool, exe := updateSetup(t, "1.0.0")
+	publishRelease(t, pool, "1.1.0", aProgramFor("new"), "")
+
+	term := newTerminal(t, serverURL, "alice@example.com")
+	term.until("the offer", func() bool { return term.m.pendingUpdate != nil })
+
+	term.drive(term.press("n"))
+	if term.m.showHelp || term.m.pendingUpdate != nil || term.m.store.SkippedVersion != "" {
+		t.Fatal("not now closes the page and remembers nothing")
+	}
+	if got, _ := os.ReadFile(exe); !bytes.Equal(got, aProgramFor("old")) {
+		t.Fatal("the program must not change")
+	}
+
+	// /update brings the offer back.
+	term.run("/update")
+	term.until("the offer again", func() bool { return term.m.pendingUpdate != nil })
+
+	// Skip: not offered again by itself, even on the next run, but /update still offers it.
+	term.drive(term.press("s"))
+	if term.m.store.SkippedVersion != "1.1.0" {
+		t.Fatalf("skipped %q", term.m.store.SkippedVersion)
+	}
+	again := newTerminalWithStore(t, serverURL, "alice@example.com", term.m.store)
+	time.Sleep(700 * time.Millisecond)
+	again.until("a moment", func() bool { return time.Now().UnixMilli()%1 == 0 })
+	if again.m.pendingUpdate != nil {
+		t.Fatal("a skipped version must not be offered again by itself")
+	}
+	again.run("/update")
+	again.until("the offer on request", func() bool { return again.m.pendingUpdate != nil })
+}
+
+func TestNoOfferWhenUpToDateOrDevelopmentBuild(t *testing.T) {
+	for _, running := range []string{"1.1.0", "2.0.0", "dev"} {
+		serverURL, pool, _ := updateSetup(t, running)
+		publishRelease(t, pool, "1.1.0", aProgramFor("same"), "")
+		term := newTerminal(t, serverURL, "alice@example.com")
+		time.Sleep(600 * time.Millisecond)
+		term.until("a moment", func() bool { return true })
+		if term.m.pendingUpdate != nil || term.m.showHelp {
+			t.Errorf("running %s: nothing newer exists, nothing should be offered", running)
+		}
+	}
+	// Asking by hand says so in words.
+	serverURL, pool, _ := updateSetup(t, "1.1.0")
+	publishRelease(t, pool, "1.1.0", aProgramFor("same"), "")
+	term := newTerminal(t, serverURL, "alice@example.com")
+	term.run("/update")
+	term.until("the answer", term.heard("you have the newest version (v1.1.0)"))
+}
+
+func TestABrokenDownloadNeverTouchesTheProgram(t *testing.T) {
+	serverURL, pool, exe := updateSetup(t, "1.0.0")
+	publishRelease(t, pool, "1.1.0", aProgramFor("new"), strings.Repeat("0", 64)) // the published checksum is wrong
+
+	term := newTerminal(t, serverURL, "alice@example.com")
+	term.until("the offer", func() bool { return term.m.pendingUpdate != nil })
+	if quit := term.drive(term.press("y")); quit {
+		t.Fatal("a failed update must not close the program")
+	}
+	if !strings.Contains(entriesText(term.m.groups[0]), "update failed") || !strings.Contains(entriesText(term.m.groups[0]), "checksum") {
+		t.Fatalf("the failure should be explained:\n%s", entriesText(term.m.groups[0]))
+	}
+	if got, _ := os.ReadFile(exe); !bytes.Equal(got, aProgramFor("old")) {
+		t.Fatal("the working program must be untouched")
+	}
+	if _, err := os.Stat(update.StagePath(exe)); err == nil {
+		t.Fatal("the bad download must not stay on disk")
+	}
+	if term.m.busy {
+		t.Fatal("the screen should be usable again")
+	}
+}
+
+func TestSavingSongsToDisk(t *testing.T) {
+	term, _, _ := musicSetup(t, "mpv", `exit 0`)
+	dir := filepath.Join(t.TempDir(), "my music") // does not exist yet, and has a space in it
+
+	term.run(`/save 2 "` + dir + `"`)
+	term.until("the song to be saved", term.heard("saved 1 song(s)"))
+	data, err := os.ReadFile(filepath.Join(dir, "The Tests - Song 2.mp3"))
+	if err != nil || !bytes.Equal(data, bytes.Repeat([]byte{'c'}, 200)) {
+		t.Fatalf("the file should be there, byte for byte: %v (%d bytes)", err, len(data))
+	}
+	if term.m.busy || term.m.progress != nil {
+		t.Fatal("the transfer should be over")
+	}
+
+	// Saving again never overwrites what is there.
+	term.run(`/save 2 "` + dir + `"`)
+	term.until("the second copy", func() bool { _, err := os.Stat(filepath.Join(dir, "The Tests - Song 2 (2).mp3")); return err == nil })
+	term.until("the report", func() bool { return strings.Count(entriesText(term.m.groups[0]), "saved 1 song(s)") == 2 })
+
+	// The whole library.
+	all := filepath.Join(t.TempDir(), "everything")
+	term.run(`/save all ` + all)
+	term.until("all of them", term.heard("saved 3 song(s)"))
+	entries, _ := os.ReadDir(all)
+	if len(entries) != 3 {
+		t.Fatalf("saved %d files: %v", len(entries), entries)
+	}
+
+	// Mistakes get an answer and change nothing.
+	for command, want := range map[string]string{
+		"/save":           "usage: /save",
+		"/save banana":    "nothing matches",
+		"/save 1 a b":     "usage: /save",
+		"/save 99 " + all: "nothing matches",
+	} {
+		term.run(command)
+		term.until(command, term.heard(want))
+	}
+	if entries, _ := os.ReadDir(all); len(entries) != 3 {
+		t.Fatal("a failed save must not leave files behind")
+	}
+}
+
+func songHash(number int) string {
+	sum := md5.Sum(bytes.Repeat([]byte{byte('a' + number)}, 100*number))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestSongsAreListedWithAHashAndNamedByNumberHashOrName(t *testing.T) {
+	term, played, _ := musicSetup(t, "mpv", `echo "$last" >> RECORD; sleep 0.05`)
+
+	term.run("/music")
+	term.until("the library", term.heard("The Tests - Song 3.mp3"))
+	listing := entriesText(term.m.groups[0])
+	for number := 1; number <= 3; number++ {
+		want := fmt.Sprintf("#%-3d %s  The Tests - Song %d.mp3", number, songHash(number)[:8], number)
+		if !strings.Contains(listing, want) {
+			t.Errorf("the list lacks %q:\n%s", want, listing)
+		}
+	}
+
+	dir := t.TempDir()
+	// The same song, named four ways, is saved each time (as copies, never over one another).
+	for index, name := range []string{"2", "#2", songHash(2)[:6], "song 2", "The Tests - Song 2"} {
+		term.run(`/save "` + name + `" "` + dir + `"`) // names with spaces go in quotes
+		term.until("copy "+name, func() bool {         // one transfer at a time: wait for each to finish
+			entries, _ := os.ReadDir(dir)
+			return len(entries) == index+1 && !term.m.busy
+		})
+	}
+
+	// Playing by hash starts there.
+	term.run("/play " + songHash(3)[:5])
+	term.until("it to play", func() bool { return len(played()) >= 1 })
+	if got := order(played()[:1]); got != "3" {
+		t.Fatalf("/play by hash started with %q", got)
+	}
+	term.run("/stop")
+
+	term.run("/play nothing-like-this")
+	term.until("not found", term.heard("nothing matches"))
+}
+
+func TestSharedFilesAreListedWithHashesAndDownloadedByAnyOfThem(t *testing.T) {
+	alice, _ := twoUsers(t)
+	alice.run("/create share-here")
+	alice.until("the group", func() bool { return len(alice.m.groups) == 2 && !alice.m.groups[1].adding })
+
+	content := bytes.Repeat([]byte("same bytes as md5sum sees\n"), 100)
+	file := filepath.Join(t.TempDir(), "hello.txt")
+	os.WriteFile(file, content, 0o644)
+	sum := md5.Sum(content)
+	want := hex.EncodeToString(sum[:])
+
+	alice.m.input.SetValue("/upload " + file)
+	alice.m.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	alice.drive(alice.press("y"))
+	if got := alice.m.vault.Files["hello.txt"].Hash; got != want {
+		t.Fatalf("the upload's hash is %q, md5sum says %q", got, want)
+	}
+	if !strings.Contains(entriesText(alice.m.groups[1]), "md5 "+want[:8]) {
+		t.Fatalf("the upload should say its hash:\n%s", entriesText(alice.m.groups[1]))
+	}
+
+	alice.run("/files")
+	alice.until("the list", alice.heard("hello.txt"))
+	listing := entriesText(alice.m.groups[0]) + entriesText(alice.m.groups[1])
+	if !strings.Contains(listing, "#1   "+want[:8]+"  hello.txt") {
+		t.Fatalf("the list should show number, hash and name:\n%s", listing)
+	}
+
+	// By name, number, #number and the start of the hash: each fetches the file, checks its MD5, and says so.
+	for _, name := range []string{"hello.txt", "1", "#1", want[:6]} {
+		dir := t.TempDir()
+		alice.m.input.SetValue("/download " + name + ` "` + dir + `"`)
+		alice.drive(alice.pressEnter())
+		if got, err := os.ReadFile(filepath.Join(dir, "hello.txt")); err != nil || !bytes.Equal(got, content) {
+			t.Fatalf("/download %s: %v", name, err)
+		}
+		if !strings.Contains(entriesText(alice.m.groups[1]), "md5 "+want+" matches") {
+			t.Fatalf("/download %s should say the MD5 matched:\n%s", name, entriesText(alice.m.groups[1]))
+		}
+		alice.m.groups[1].entries = nil
+	}
+
+	alice.run("/download nosuch")
+	alice.until("an answer", alice.heard("nothing matches"))
+	alice.run("/download 7")
+	alice.until("an answer", alice.heard("nothing matches"))
+}
+
+// A share from another person carries its hash into the list; one that lies is refused at download.
+func TestAHashFromAnotherPersonIsKeptAndChecked(t *testing.T) {
+	alice, _ := twoUsers(t)
+	alice.run("/create share-here")
+	alice.until("the group", func() bool { return len(alice.m.groups) == 2 && !alice.m.groups[1].adding })
+	group := alice.m.groups[1]
+
+	hash := strings.Repeat("ab", 16)
+	message, _ := json.Marshal(payload{Kind: "file", Handle: "bobby", Name: "photo.jpg", Link: "http://x/api/files/0123456789abcdef0123456789abcdef#k", Size: 99, Hash: hash})
+	sealed, _ := group.secret.Seal(message)
+	alice.m.receive(Event{Type: "msg", GID: group.secret.GIDHex(), CT: sealed, Seq: 1, TS: time.Now().UnixMilli()})
+	if got := alice.m.vault.Files["photo.jpg"].Hash; got != hash {
+		t.Fatalf("the sender's hash should be kept, got %q", got)
+	}
+	if !strings.Contains(entriesText(group), "md5 abababab") {
+		t.Fatalf("the message should show the hash:\n%s", entriesText(group))
+	}
+
+	// A made-up hash is not kept.
+	for index, bad := range []string{"not-hex", strings.Repeat("z", 32), "abc"} {
+		message, _ := json.Marshal(payload{Kind: "file", Handle: "bobby", Name: fmt.Sprintf("bad%d.jpg", index), Link: "http://x/api/files/0123456789abcdef0123456789abcdef#k", Size: 1, Hash: bad})
+		sealed, _ := group.secret.Seal(message)
+		alice.m.receive(Event{Type: "msg", GID: group.secret.GIDHex(), CT: sealed, Seq: uint64(10 + index), TS: time.Now().UnixMilli()})
+		if got := alice.m.vault.Files[fmt.Sprintf("bad%d.jpg", index)].Hash; got != "" {
+			t.Errorf("%q should not be accepted as a hash, kept %q", bad, got)
+		}
+	}
+}
+
+func (term *terminal) pressEnter() tea.Cmd { return term.press("enter") }
+
+// A song streams the first time and leaves a copy; the next time it is played from that copy.
+func TestASongIsPlayedFromItsCopyAfterTheFirstTime(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("the stand-in player needs curl to listen to the stream")
+	}
+	term, played, _ := musicSetup(t, "mpv", `curl -s "$last" -o /dev/null; echo "$last" >> RECORD`)
+
+	term.run("/play 2")
+	term.waitPlays(played, 1)
+	if !strings.HasPrefix(played()[0], "http://127.0.0.1:") {
+		t.Fatalf("the first play streams: %q", played()[0])
+	}
+	term.run("/stop")
+	track := music.Track{ID: 2, Ext: "mp3", Size: 200}
+	term.until("the copy", func() bool { _, ok := music.Cached(track); return ok })
+
+	term.run("/play 2")
+	term.waitPlays(played, 2)
+	if second := played()[1]; strings.HasPrefix(second, "http") || !strings.HasSuffix(second, filepath.Join("music", "2.mp3")) {
+		t.Fatalf("the second play should use the copy on disk, got %q", second)
+	}
+	term.run("/stop")
+}
+
+// Against a real server: the website address it names reaches the login screen before anyone logs in.
+func TestTheServerNamesItsWebsiteBeforeLogin(t *testing.T) {
+	serverURL, _ := startTestServer(t, false)
+	handlers.Config.WebsiteURL = "https://accounts.example.net"
+	store, _ := LoadStore(filepath.Join(t.TempDir(), "client.json"))
+	m := NewModel(store, "")
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	term := &terminal{t: t, m: m, messages: make(chan tea.Msg, 100)}
+	m.server = NewServer(serverURL)
+	m.server.report = func(message tea.Msg) { term.messages <- message }
+	t.Cleanup(m.server.Stop)
+	m.Update(ServerUp{})
+	term.until("the server's answer", func() bool { return m.website != "" })
+	if m.website != "https://accounts.example.net" || !strings.Contains(m.authView(), "https://accounts.example.net/register") {
+		t.Fatalf("website %q:\n%s", m.website, m.authView())
 	}
 }

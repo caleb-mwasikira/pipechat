@@ -5,7 +5,6 @@
     <p class="font-mono text-xs uppercase tracking-[0.2em] text-cyber-neon">// admin</p>
     <h1 class="font-mono text-3xl font-black text-white">Binaries</h1>
 </div>
-<x-status />
 
 <a href="{{ route('admin.binaries.create') }}" class="mb-6 inline-block bg-cyber-neon px-4 py-2.5 font-mono text-xs font-bold uppercase tracking-wider text-black transition-all hover:bg-emerald-400 neon-glow-green"><i class="fa-solid fa-upload mr-2"></i>Upload a binary</a>
 

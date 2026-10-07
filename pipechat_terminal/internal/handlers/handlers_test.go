@@ -64,8 +64,9 @@ CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', han
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
 CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
-CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, uploaded_by BIGINT REFERENCES users(id));
-CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, expires_at TIMESTAMP, created_at TIMESTAMP);
+CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, uploaded_by BIGINT REFERENCES users(id));
+CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, expires_at TIMESTAMP, created_at TIMESTAMP);
+CREATE TABLE binaries (id BIGSERIAL PRIMARY KEY, os TEXT NOT NULL, arch TEXT NOT NULL, version TEXT NOT NULL, filename TEXT NOT NULL, path TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT NOT NULL, sha256 TEXT NOT NULL);
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
 // useServer starts the routes on a fresh database schema and returns the server's address.
@@ -867,4 +868,80 @@ func listenAndKeep(t *testing.T, base string, token string) *websocket.Conn {
 	}
 	t.Cleanup(func() { connection.CloseNow() })
 	return connection
+}
+
+func TestTheNewestClientIsOfferedForEachSystem(t *testing.T) {
+	base := useServer(t)
+	Config.StorageDir = t.TempDir()
+	os.MkdirAll(filepath.Join(Config.StorageDir, "downloads"), 0o755)
+	os.WriteFile(filepath.Join(Config.StorageDir, "downloads", "new"), []byte("0123456789"), 0o755)
+	add := func(osName, arch, version, path string) {
+		Pool.Exec(`INSERT INTO binaries (os, arch, version, filename, path, size, md5, sha256) VALUES ($1, $2, $3, $4, $5, 10, 'md5-'||$3, 'sha-'||$3)`,
+			osName, arch, version, "pipechat-"+version, path)
+	}
+	add("linux", "amd64", "1.9.0", "downloads/old")
+	add("linux", "amd64", "1.10.0", "downloads/new") // 1.10 is newer than 1.9
+	add("linux", "amd64", "1.11.0-beta.1", "downloads/new")
+	add("linux", "amd64", "bogus", "downloads/new")
+	add("windows", "amd64", "2.0.0", "../../etc/passwd")
+
+	var answer versionResponse
+	if status := call(t, "GET", base+"/api/version?os=linux&arch=amd64", "", nil, &answer); status != 200 || answer.Version != "1.11.0-beta.1" && answer.Version != "1.10.0" {
+		t.Fatalf("version: %d %+v", status, answer)
+	}
+	// A pre-release is older than the release it leads to, but newer than earlier releases: 1.11.0-beta.1 > 1.10.0.
+	if answer.Version != "1.11.0-beta.1" || answer.SHA256 != "sha-1.11.0-beta.1" || answer.Size != 10 || !strings.HasPrefix(answer.URL, "/api/update/") {
+		t.Fatalf("newest: %+v", answer)
+	}
+	if status := call(t, "GET", base+"/api/version?os=macos&arch=arm64", "", nil, nil); status != http.StatusNotFound {
+		t.Fatalf("nothing published for macOS: %d", status)
+	}
+	for _, bad := range []string{"", "?os=plan9&arch=amd64", "?os=linux&arch=mips", "?os=linux"} {
+		if status := call(t, "GET", base+"/api/version"+bad, "", nil, nil); status != http.StatusBadRequest {
+			t.Errorf("version%s: %d", bad, status)
+		}
+	}
+
+	get := func(path string, rangeHeader string) (int, string) {
+		request, _ := http.NewRequest("GET", base+path, nil)
+		if rangeHeader != "" {
+			request.Header.Set("Range", rangeHeader)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(body)
+	}
+	if status, body := get(answer.URL, ""); status != 200 || body != "0123456789" {
+		t.Fatalf("download: %d %q", status, body)
+	}
+	if status, body := get(answer.URL, "bytes=3-5"); status != http.StatusPartialContent || body != "345" {
+		t.Fatalf("a download can be resumed: %d %q", status, body)
+	}
+	var windowsID int64
+	Pool.QueryRow(`SELECT id FROM binaries WHERE os = 'windows'`).Scan(&windowsID)
+	if status, _ := get("/api/update/"+strconv.FormatInt(windowsID, 10), ""); status != http.StatusNotFound {
+		t.Fatalf("a path outside the storage folder: %d", status)
+	}
+	if status, _ := get("/api/update/9999", ""); status != http.StatusNotFound {
+		t.Fatalf("no such download: %d", status)
+	}
+	if status, _ := get("/api/update/abc", ""); status != http.StatusBadRequest {
+		t.Fatalf("bad id: %d", status)
+	}
+}
+
+func TestInfoSaysWhereToRegisterWithoutALogin(t *testing.T) {
+	base := useServer(t)
+	var info infoResponse
+	if status := call(t, "GET", base+"/api/info", "", nil, &info); status != 200 || info.Website != "" {
+		t.Fatalf("not configured: %d %+v", status, info)
+	}
+	Config.WebsiteURL = "https://pipechat.example.com"
+	if status := call(t, "GET", base+"/api/info", "", nil, &info); status != 200 || info.Website != "https://pipechat.example.com" {
+		t.Fatalf("configured: %d %+v", status, info)
+	}
 }

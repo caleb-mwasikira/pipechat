@@ -2,7 +2,6 @@
 @section('title', 'Login')
 @section('content')
 <x-card>
-    <x-status />
     <form method="POST" action="{{ route('login') }}" class="space-y-4">
         @csrf
         <x-heading title="SECURE ACCOUNT LOGIN" sub="Enter your credentials to access downloads." />

@@ -373,9 +373,9 @@ func (s *Server) Music() ([]music.Track, error) {
 	return tracks, err
 }
 
-// DownloadTrack saves a track to path. It is written to a temporary name first, so an interrupted
+// DownloadTrack saves a track to path, telling progress (if given) how far it got. It is written to a temporary name first, so an interrupted
 // download is never mistaken for a whole song later.
-func (s *Server) DownloadTrack(id int64, path string) error {
+func (s *Server) DownloadTrack(id int64, path string, progress func(done, total int64)) error {
 	request, err := http.NewRequest("GET", s.url+"/api/music/"+strconv.FormatInt(id, 10)+"/file", nil)
 	if err != nil {
 		return err
@@ -403,7 +403,11 @@ func (s *Server) DownloadTrack(id int64, path string) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(file, response.Body)
+	var source io.Reader = response.Body
+	if progress != nil {
+		source = &progressReader{reader: response.Body, total: response.ContentLength, progress: progress}
+	}
+	_, err = io.Copy(file, source)
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
 	}
@@ -451,6 +455,30 @@ func (s *Server) Online(groupID string) ([]string, error) {
 
 // ReportShare tells the server a file was shared in a chat, so a website group's page can list it.
 // It is best effort: chats that are not website groups answer 404, which is fine.
-func (s *Server) ReportShare(groupID string, name string, size int64) {
-	s.call("POST", "/api/sync/shares", map[string]any{"gid": groupID, "name": name, "size": size}, nil)
+func (s *Server) ReportShare(groupID string, name string, size int64, hash string) {
+	s.call("POST", "/api/sync/shares", map[string]any{"gid": groupID, "name": name, "size": size, "md5": hash}, nil)
+}
+
+// progressReader reports how many bytes have been read through it.
+type progressReader struct {
+	reader   io.Reader
+	total    int64
+	done     int64
+	progress func(done, total int64)
+}
+
+func (p *progressReader) Read(buffer []byte) (int, error) {
+	count, err := p.reader.Read(buffer)
+	p.done += int64(count)
+	p.progress(p.done, p.total)
+	return count, err
+}
+
+// Info asks for what is known before logging in: where people register. It returns "" when the server does not say.
+func (s *Server) Info() (website string, err error) {
+	var info struct {
+		Website string `json:"website"`
+	}
+	err = s.call("GET", "/api/info", nil, &info)
+	return info.Website, err
 }

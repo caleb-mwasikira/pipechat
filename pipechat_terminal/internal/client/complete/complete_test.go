@@ -76,3 +76,19 @@ func TestPathsOnlyWhereAPathGoes(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveCompletesFoldersForItsSecondWord(t *testing.T) {
+	root := tree(t)
+	got := Paths("/save 3 " + root + "/")
+	if len(got) == 0 {
+		t.Fatal("the folder to save into should complete")
+	}
+	for _, suggestion := range got {
+		if !strings.HasSuffix(suggestion, "/") {
+			t.Errorf("only folders fit: %s", suggestion)
+		}
+	}
+	if got := Paths("/save " + root + "/"); len(got) != 0 {
+		t.Errorf("the first word of /save is a number: %v", got)
+	}
+}

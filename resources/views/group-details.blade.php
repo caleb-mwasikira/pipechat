@@ -22,7 +22,6 @@
         &middot; {{ $group->gid ? 'created in the terminal' : 'waiting for the owner\'s terminal to create it' }}
     </p>
 </div>
-<x-status />
 
 <div class="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-6">
     @foreach ($stats as $label => $value)
@@ -79,7 +78,7 @@
                         @foreach ($files as $file)
                             @php $expired = $file->expires_at && \Illuminate\Support\Carbon::parse($file->expires_at)->lt($now); @endphp
                             <tr class="border-t border-cyber-700 text-gray-300">
-                                <td class="p-3 break-all text-white">{{ $file->name }}</td>
+                                <td class="p-3 break-all text-white">{{ $file->name }}@if ($file->md5)<span class="ml-2 text-gray-500" title="MD5 {{ $file->md5 }}">{{ substr($file->md5, 0, 8) }}</span>@endif</td>
                                 <td class="p-3">{{ $size($file->size) }}</td>
                                 <td class="p-3">{{ $file->sharer ? '@'.$file->sharer : 'removed user' }}</td>
                                 <td class="p-3 text-gray-400">{{ \Illuminate\Support\Carbon::parse($file->created_at)->diffForHumans() }}</td>

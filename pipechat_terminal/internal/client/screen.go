@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"pipechat/internal/client/music"
 	"pipechat/internal/client/ui"
+	"pipechat/internal/client/update"
 	"strings"
 	"time"
 	"unicode"
@@ -71,6 +72,7 @@ type payload struct {
 	Name   string `json:"n,omitempty"` // file: short name
 	Link   string `json:"l,omitempty"` // file: download link, with the key in it
 	Size   int64  `json:"s,omitempty"` // file: bytes
+	Hash   string `json:"m,omitempty"` // file: MD5 of the file (or the packed folder)
 }
 
 // A shared file we know about: our own uploads and what others sent us.
@@ -78,7 +80,8 @@ type fileRecord struct {
 	Link string `json:"link"`
 	Size int64  `json:"size"`
 	From string `json:"from"`
-	At   int64  `json:"at"` // unix seconds
+	At   int64  `json:"at"`             // unix seconds
+	Hash string `json:"hash,omitempty"` // MD5, in hex
 }
 
 const filesLimit = 200
@@ -174,6 +177,11 @@ type Model struct {
 	proxy         *music.Proxy        // lets a player stream a song without the login token
 	showHelp      bool                // a full-screen page (help, /whois) is open
 	pageTitle     string
+	pendingUpdate *update.Release // the new version on offer, while its page is open
+	restartExe    string          // set after an update: the program to start once the screen closes
+	checkedUpdate bool            // asked the server about updates this run
+	askedInfo     *Server         // the server already asked where to register
+	website       string          // where to register, as the server says; empty means the server's own address
 	progress      *files.Progress // how far the upload or download has got
 	pathMode      bool            // the input holds /upload or /download, whose suggestions are file names
 	pageFooter    string          // what the bottom line of a page says; empty for the usual
@@ -253,6 +261,7 @@ func (m *Model) connectTo(address string) {
 	}
 	m.connectError = ""
 	m.serverReached = false
+	m.website = "" // each server says where its own website is
 	m.server = NewServer(address)
 	m.server.Connect(m.report)
 }
@@ -301,6 +310,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.serverReached {
 			m.serverAnswered()
 		}
+		m.askWhereToRegister()
 		if m.session != nil && !m.loggedIn && !m.relogging {
 			m.relogging = true
 			m.loginAsync(m.session, true)
@@ -388,7 +398,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.Err != nil {
 			m.notice(current, "download failed: "+message.Err.Error())
 		} else {
-			m.notice(current, fmt.Sprintf("downloaded %s (%s) to %s: %s", message.Name, files.FormatSize(message.Bytes), message.Dir, strings.Join(message.Entries, ", ")))
+			m.notice(current, downloadMessage(message))
 		}
 		return m, nil
 
@@ -427,6 +437,25 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice(m.groups[m.current], message.name+" is no longer listed. People already in it stay in; nobody new can join by name.")
 		}
 		return m, nil
+
+	case musicSaved:
+		m.handleMusicSaved(message)
+		return m, nil
+
+	case infoResult:
+		if message.err == nil {
+			m.website = message.website
+		}
+		return m, nil
+
+	case updateChecked:
+		return m, m.handleUpdateChecked(message)
+
+	case updateDownloaded:
+		return m, m.handleUpdateDownloaded(message)
+
+	case updateInstalled:
+		return m, m.handleUpdateInstalled(message)
 
 	case profileResult:
 		return m, m.showProfile(message)
@@ -550,7 +579,7 @@ func (m *Model) loginAsync(auth *pendingAuth, reconnect bool) {
 
 func (m *Model) authView() string {
 	title := "Log in to Pipechat"
-	hint := "Enter to log in · Ctrl+S to change server · Ctrl+C to quit\nNo account yet? Register on the website."
+	hint := "Enter to log in · Ctrl+S to change server · Ctrl+C to quit"
 	lines := []string{ui.Title.Render(title), "", "Email", m.emailInput.View(), "", "Password", m.passwordInput.View(), ""}
 	switch {
 	case m.pending != nil:
@@ -563,6 +592,12 @@ func (m *Model) authView() string {
 		lines = append(lines, ui.Dim.Render("connected to "+m.server.URL()))
 	}
 	lines = append(lines, ui.Dim.Render(hint))
+	if m.server != nil {
+		// Accounts are made on the website, so say where it is.
+		lines = append(lines, "",
+			ui.Dim.Render("No account yet? Create one here:"), "  "+ui.Link(m.accountURL("/register"), m.accountURL("/register")),
+			ui.Dim.Render("Forgot your password?"), "  "+ui.Link(m.accountURL("/forgot-password"), m.accountURL("/forgot-password")))
+	}
 	box := ui.AuthBox.Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(max(m.width, 1), max(m.height, 1), lipgloss.Center, lipgloss.Center, box)
 }
@@ -623,6 +658,10 @@ func (m *Model) handleAuth(result authResult) {
 	}
 	m.afterLogin(result.login.Peers)
 	m.syncAsync()
+	if !m.checkedUpdate {
+		m.checkedUpdate = true
+		m.checkForUpdate(false)
+	}
 }
 
 // newIdentity makes a new key pair and an empty vault, and sends both to the server.
@@ -933,7 +972,7 @@ func (m *Model) findGroup(id string) *groupState {
 // droppedFromGroup forgets a group the creator removed us from.
 // openPage takes over the whole screen with some text, until the person presses Esc.
 func (m *Model) openPage(title string, content func(width int) string) tea.Cmd {
-	if m.pendingSend == nil {
+	if m.pendingSend == nil && m.pendingUpdate == nil {
 		m.pageFooter = ""
 	}
 	m.showHelp, m.pageTitle, m.pageContent = true, title, content
@@ -1040,9 +1079,10 @@ func (m *Model) receiveMessage(frame Event, replay bool) {
 			if !files.ShortNamePattern.MatchString(content.Name) {
 				line.text = "[invalid file share]"
 			} else {
-				line.text = fmt.Sprintf("@%s shared \"%s\" (%s). Download with: /download %s DIR", cleanText(content.Handle), content.Name, files.FormatSize(content.Size), content.Name)
+				hash := cleanHash(content.Hash)
+				line.text = fmt.Sprintf("@%s shared \"%s\" (%s%s). Download with: /download %s", cleanText(content.Handle), content.Name, files.FormatSize(content.Size), hashNote(hash), content.Name)
 				if !line.self && !replay {
-					m.rememberFile(content.Name, fileRecord{Link: content.Link, Size: content.Size, From: cleanText(content.Handle), At: time.Now().Unix()})
+					m.rememberFile(content.Name, fileRecord{Link: content.Link, Size: content.Size, From: cleanText(content.Handle), At: time.Now().Unix(), Hash: hash})
 				}
 			}
 		} else if content.Kind == "join" {
@@ -1105,6 +1145,14 @@ func (m *Model) send(g *groupState, content payload) error {
 
 func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showHelp {
+		if m.pendingUpdate != nil {
+			if command, handled := m.answerUpdate(key.String()); handled {
+				return m, command
+			}
+			var command tea.Cmd
+			m.helpView, command = m.helpView.Update(key)
+			return m, command
+		}
 		if m.pendingSend != nil {
 			// The upload preview: a yes uploads, anything that closes the page cancels.
 			switch key.String() {
@@ -1164,8 +1212,8 @@ func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var command tea.Cmd
 	m.input, command = m.input.Update(key)
 	// File names depend on what has been typed, so work them out again after every key.
-	if strings.HasPrefix(m.input.Value(), "/upload ") || strings.HasPrefix(m.input.Value(), "/download ") || m.pathMode {
-		m.pathMode = strings.HasPrefix(m.input.Value(), "/upload ") || strings.HasPrefix(m.input.Value(), "/download ")
+	if takesPath(m.input.Value()) || m.pathMode {
+		m.pathMode = takesPath(m.input.Value())
 		m.refreshSuggestions()
 	}
 	return m, command
@@ -1306,36 +1354,27 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		return m.startDownload(current, argument)
 
 	case "/files":
-		if len(m.vault.Files) == 0 {
-			m.notice(current, "no shared files yet; use /upload PATH")
-		}
-		for name, record := range m.vault.Files {
-			who := "you"
-			if record.From != "" {
-				who = "@" + record.From
-			}
-			m.notice(current, fmt.Sprintf("%s  %s  from %s  %s", name, files.FormatSize(record.Size), who, time.Unix(record.At, 0).Format("2006-01-02 15:04")))
-		}
+		m.showShared(current)
 
 	case "/link":
-		if record, found := m.vault.Files[argument]; found {
-			m.notice(current, "Link for "+argument+" (it contains the decryption key, share it privately):\n"+record.Link)
+		if file, err := m.findShared(argument); err != nil {
+			m.notice(current, err.Error())
 		} else {
-			m.notice(current, "no file named "+argument+", see /files")
+			m.notice(current, "Link for "+file.Name+" (it contains the decryption key, share it privately):\n"+file.Link)
 		}
 
 	case "/share":
-		record, found := m.vault.Files[argument]
+		file, err := m.findShared(argument)
 		switch {
-		case !found:
-			m.notice(current, "no file named "+argument+", see /files")
+		case err != nil:
+			m.notice(current, err.Error())
 		case current.secret == nil:
 			m.notice(current, "open a group or direct chat first")
 		default:
-			if err := m.send(current, payload{Kind: "file", Handle: m.session.handle, Name: argument, Link: record.Link, Size: record.Size}); err != nil {
+			if err := m.send(current, payload{Kind: "file", Handle: m.session.handle, Name: file.Name, Link: file.Link, Size: file.Size, Hash: file.Hash}); err != nil {
 				m.notice(current, "not sent: "+err.Error())
 			} else {
-				m.reportShare(current, argument, record.Size)
+				m.reportShare(current, file.Name, file.Size, file.Hash)
 			}
 		}
 
@@ -1384,12 +1423,21 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		}
 		m.switchTo(index)
 
+	case "/search", "/find":
+		return m.searchCommand(current, argument)
+
+	case "/update":
+		m.updateCommand(current)
+
 	case "/music":
 		m.notice(current, "asking the server for the music library...")
 		m.server.enqueue(func() {
 			tracks, err := m.server.Music()
 			m.server.report(musicList{tracks: tracks, err: err})
 		})
+
+	case "/save":
+		m.saveCommand(current, argument)
 
 	case "/play":
 		m.playCommand(current, argument)
@@ -1647,15 +1695,15 @@ func (m *Model) finishUpload(result files.Done) {
 		m.notice(target, "upload failed: "+result.Err.Error())
 		return
 	}
-	m.rememberFile(result.Name, fileRecord{Link: result.Link, Size: result.Bytes, At: time.Now().Unix()})
-	summary := fmt.Sprintf("uploaded \"%s\": %d files, %s", result.Name, result.Files, files.FormatSize(result.Bytes))
+	m.rememberFile(result.Name, fileRecord{Link: result.Link, Size: result.Bytes, At: time.Now().Unix(), Hash: result.Hash})
+	summary := fmt.Sprintf("uploaded \"%s\": %d files, %s%s", result.Name, result.Files, files.FormatSize(result.Bytes), hashNote(result.Hash))
 	if target.secret == nil {
 		m.notice(target, summary+". Get the link with /link "+result.Name+", or open a chat and /share "+result.Name)
 		return
 	}
 	m.notice(target, summary)
-	m.reportShare(target, result.Name, result.Bytes)
-	if err := m.send(target, payload{Kind: "file", Handle: m.session.handle, Name: result.Name, Link: result.Link, Size: result.Bytes}); err != nil {
+	m.reportShare(target, result.Name, result.Bytes, result.Hash)
+	if err := m.send(target, payload{Kind: "file", Handle: m.session.handle, Name: result.Name, Link: result.Link, Size: result.Bytes, Hash: result.Hash}); err != nil {
 		m.notice(target, "link not sent: "+err.Error()+" (use /share "+result.Name+" later)")
 	}
 }
@@ -1684,14 +1732,16 @@ func (m *Model) startDownload(current *groupState, argument string) tea.Cmd {
 	if len(arguments) == 2 {
 		target = files.ExpandHome(arguments[1])
 	}
-	name, link := arguments[0], arguments[0]
-	if record, found := m.vault.Files[name]; found {
-		link = record.Link
-	} else if !strings.Contains(name, "://") {
-		m.notice(current, "no file named "+name+", see /files")
-		return nil
+	name, link, want := arguments[0], arguments[0], ""
+	if strings.Contains(name, "://") {
+		name = "file" // a link typed in: nothing is known about it but its address
 	} else {
-		name = "file"
+		file, err := m.findShared(name)
+		if err != nil {
+			m.notice(current, err.Error())
+			return nil
+		}
+		name, link, want = file.Name, file.Link, file.Hash
 	}
 	address, _, err := files.ParseLink(link)
 	if err != nil {
@@ -1700,7 +1750,7 @@ func (m *Model) startDownload(current *groupState, argument string) tea.Cmd {
 	}
 	m.busy, m.transfer = true, "downloading "+name
 	m.notice(current, "downloading "+name+" from "+strings.SplitN(strings.TrimPrefix(strings.TrimPrefix(address, "http://"), "https://"), "/", 2)[0]+" to "+target+"...")
-	return func() tea.Msg { return files.Download(m.server, link, target, name) }
+	return func() tea.Msg { return files.Download(m.server, link, target, name, want) }
 }
 
 // ---- connect screen ----
@@ -1761,4 +1811,51 @@ func shortError(err error) string {
 		return failure.Err.Error()
 	}
 	return err.Error()
+}
+
+// takesPath says whether the input holds a command whose last word is a file or folder name.
+func takesPath(text string) bool {
+	return strings.HasPrefix(text, "/upload ") || strings.HasPrefix(text, "/download ") || strings.HasPrefix(text, "/save ")
+}
+
+// cleanHash accepts a hash from another person only if it is 32 hex characters.
+func cleanHash(hash string) string {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if len(hash) != 32 {
+		return ""
+	}
+	for _, character := range hash {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return ""
+		}
+	}
+	return hash
+}
+
+// accountURL is an address on the website, where accounts are made: the one the server names, or else the
+// server's own address, which is where the website is when it is behind the same domain.
+func (m *Model) accountURL(path string) string {
+	base := m.website
+	if base == "" && m.server != nil {
+		base = m.server.URL()
+	}
+	return strings.TrimRight(base, "/") + path
+}
+
+type infoResult struct {
+	website string
+	err     error
+}
+
+// askWhereToRegister asks the server, once per server, where the website is.
+func (m *Model) askWhereToRegister() {
+	if m.server == nil || m.askedInfo == m.server {
+		return
+	}
+	m.askedInfo = m.server
+	server := m.server
+	go func() {
+		website, err := server.Info()
+		server.report(infoResult{website: website, err: err})
+	}()
 }

@@ -5,7 +5,6 @@
     <p class="font-mono text-xs uppercase tracking-[0.2em] text-cyber-neon">// admin</p>
     <h1 class="font-mono text-3xl font-black text-white">Upload a binary</h1>
 </div>
-<x-status />
 
 @php $select = 'w-full bg-cyber-900 border border-cyber-600 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-cyber-neon'; @endphp
 <form method="POST" action="{{ route('admin.binaries.store') }}" enctype="multipart/form-data" class="max-w-3xl grid gap-4 border border-cyber-600 bg-cyber-800/90 p-5 md:grid-cols-5">

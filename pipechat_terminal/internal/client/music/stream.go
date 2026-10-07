@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Proxy lets any player stream a track without being given the login token. It listens on
@@ -21,6 +22,8 @@ type Source interface {
 
 type Proxy struct {
 	source   Source
+	mutex    sync.Mutex
+	tracks   map[int64]Track // the songs whose addresses were handed out, so a copy can be checked as it is made
 	secret   string
 	listener net.Listener
 }
@@ -33,7 +36,7 @@ func StartProxy(source Source) (*Proxy, error) {
 	}
 	raw := make([]byte, 16)
 	rand.Read(raw)
-	proxy := &Proxy{source: source, secret: hex.EncodeToString(raw), listener: listener}
+	proxy := &Proxy{tracks: map[int64]Track{}, source: source, secret: hex.EncodeToString(raw), listener: listener}
 	go http.Serve(listener, proxy)
 	return proxy, nil
 }
@@ -43,6 +46,9 @@ func (p *Proxy) For(source Source) bool { return p.source == source }
 
 // URL is the address a player can open to hear a track.
 func (p *Proxy) URL(track Track) string {
+	p.mutex.Lock()
+	p.tracks[track.ID] = track
+	p.mutex.Unlock()
 	return fmt.Sprintf("http://%s/%s/%d.%s", p.listener.Addr(), p.secret, track.ID, strings.ToLower(track.Ext))
 }
 
@@ -82,5 +88,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(response.StatusCode)
-	io.Copy(w, response.Body)
+
+	// A player that asks for the whole song, from the start, gets it, and a copy is kept for next time.
+	var copy *cacheWriter
+	trackID, _ := strconv.ParseInt(id, 10, 64)
+	p.mutex.Lock()
+	track, known := p.tracks[trackID]
+	p.mutex.Unlock()
+	if known && r.Header.Get("Range") == "" && response.StatusCode == http.StatusOK && response.ContentLength == track.Size {
+		copy = startCache(track)
+	}
+	if copy == nil {
+		io.Copy(w, response.Body)
+		return
+	}
+	written, err := io.Copy(io.MultiWriter(w, copy), response.Body)
+	copy.finish(err == nil && written == track.Size)
 }

@@ -42,6 +42,7 @@ type Progress struct {
 // Done is the result of an upload.
 type Done struct {
 	Name  string
+	Hash  string // MD5 of the file's bytes, or of the packed folder
 	Link  string
 	Bytes int64
 	Files int
@@ -51,6 +52,8 @@ type Done struct {
 // Downloaded is the result of a download.
 type Downloaded struct {
 	Name    string
+	Hash    string // MD5 of what arrived
+	Checked bool   // it was compared with the MD5 that came with the share, and matched
 	Dir     string
 	Entries []string
 	Bytes   int64
@@ -70,7 +73,7 @@ func Upload(env Env, source string, name string) Done {
 	reader, writer := io.Pipe()
 	go func() {
 		var err error
-		result.Files, err = WriteArchive(writer, source, key, &packed)
+		result.Files, result.Hash, err = WriteArchive(writer, source, key, &packed)
 		writer.CloseWithError(err)
 	}()
 
@@ -150,7 +153,7 @@ func SourceSize(source string) int64 {
 // Download fetches, decrypts and unpacks a shared file or folder into
 // targetDir. Nothing is written there unless the whole download verifies, and
 // nothing existing is overwritten.
-func Download(env Env, link string, targetDir string, name string) Downloaded {
+func Download(env Env, link string, targetDir string, name string, want string) Downloaded {
 	result := Downloaded{Name: name, Dir: targetDir}
 	address, key, err := ParseLink(link)
 	if err != nil {
@@ -178,6 +181,7 @@ func Download(env Env, link string, targetDir string, name string) Downloaded {
 	go reportProgress(env, "downloading", name, &received, max(response.ContentLength, 0), stop)
 
 	counted := &countingReader{reader: response.Body, total: &received}
-	result.Entries, result.Bytes, result.Err = ExtractArchive(counted, key, targetDir)
+	result.Entries, result.Bytes, result.Hash, result.Err = ExtractArchive(counted, key, targetDir, want)
+	result.Checked = result.Err == nil && want != ""
 	return result
 }

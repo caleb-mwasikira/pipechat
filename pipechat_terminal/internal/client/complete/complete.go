@@ -16,9 +16,9 @@ import (
 var Commands = []string{
 	"/help", "/create", "/create ", "/join ", "/public", "/dm ", "/whois ", "/me", "/bio ", "/bio clear",
 	"/groups", "/switch ", "/close", "/closed", "/reopen ", "/code", "/invite ", "/kick ", "/leave",
-	"/music", "/play", "/play all", "/next", "/stop", "/shuffle on", "/shuffle off",
+	"/music", "/play", "/play all", "/save ", "/save all ", "/next", "/stop", "/shuffle on", "/shuffle off",
 	"/repeat off", "/repeat one", "/repeat all", "/unlist ",
-	"/upload ", "/download ", "/files", "/link ", "/share ", "/clear", "/exit", "/quit",
+	"/upload ", "/download ", "/files", "/link ", "/share ", "/search ", "/search -here ", "/search -in ", "/clear", "/update", "/exit", "/quit",
 }
 
 // Paths completes the path being typed after /upload (the file or folder) or /download (the folder to
@@ -31,6 +31,8 @@ func Paths(value string) []string {
 		command = "/upload "
 	case strings.HasPrefix(value, "/download "):
 		command, dirsOnly = "/download ", true
+	case strings.HasPrefix(value, "/save "):
+		command, dirsOnly = "/save ", true
 	default:
 		return nil
 	}
@@ -51,7 +53,7 @@ func Paths(value string) []string {
 			positional++
 		}
 	}
-	if valueNext || (command == "/upload " && positional > 0) || (command == "/download " && positional != 1) {
+	if valueNext || (command == "/upload " && positional > 0) || ((command == "/download " || command == "/save ") && positional != 1) {
 		return nil
 	}
 

@@ -146,3 +146,36 @@ func TestSidebarShowsWhoIsOnline(t *testing.T) {
 		t.Error("the welcome page has no list of who is online")
 	}
 }
+
+func TestLoginScreenShowsWhereToRegister(t *testing.T) {
+	store, _ := LoadStore(t.TempDir() + "/client.json")
+	m := NewModel(store, "")
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.server = NewServer("https://chat.example.com")
+	m.serverReached, m.online = true, true
+	t.Cleanup(m.server.Stop)
+
+	// Until the server says otherwise, the website is taken to be at the server's own address.
+	view := m.authView()
+	for _, want := range []string{"No account yet?", "https://chat.example.com/register", "Forgot your password?", "https://chat.example.com/forgot-password"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the login screen lacks %q:\n%s", want, view)
+		}
+	}
+
+	// A server that names its website is believed.
+	m.Update(infoResult{website: "https://www.example.org/"})
+	view = m.authView()
+	if !strings.Contains(view, "https://www.example.org/register") || strings.Contains(view, "chat.example.com/register") {
+		t.Errorf("the named website should be used:\n%s", view)
+	}
+	// An answer with an error changes nothing.
+	m.Update(infoResult{website: "https://elsewhere.test", err: os.ErrNotExist})
+	if strings.Contains(m.authView(), "elsewhere.test") {
+		t.Error("a failed lookup must not replace the address")
+	}
+	// The link is clickable in terminals that can (an OSC 8 link around the text).
+	if !strings.Contains(m.authView(), "\x1b]8;;https://www.example.org/register") {
+		t.Error("the address should be a hyperlink")
+	}
+}

@@ -6,7 +6,6 @@
     <h1 class="font-mono text-3xl font-black text-white">Your profile</h1>
     <p class="mt-2 text-sm text-gray-400">What other people see when they type <span class="font-mono text-cyber-cyan">/whois {{ '@'.$user->handle }}</span> in the terminal. You can also change your bio there with <span class="font-mono text-cyber-cyan">/bio TEXT</span>.</p>
 </div>
-<x-status />
 
 <form method="POST" action="{{ route('profile.update') }}" class="max-w-xl space-y-4 border border-cyber-600 bg-cyber-800/90 p-5">
     @csrf

@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
+	"pipechat/internal/client/lookup"
 	"strings"
 	"time"
 
@@ -23,9 +24,9 @@ type musicList struct {
 	err    error
 }
 type musicStart struct {
-	tracks  []music.Track
-	startID int64 // 0 to begin at the top
-	err     error
+	tracks []music.Track
+	query  string // which song to start with: a number, a hash or a name; empty to begin at the top
+	err    error
 }
 type musicReady struct {
 	track  music.Track
@@ -55,26 +56,18 @@ func (m *Model) showMusic(result musicList) {
 		m.notice(current, "the library is empty; upload songs on the website, under Music")
 		return
 	}
-	m.notice(current, fmt.Sprintf("Music library (%d). /play plays it all, /play NUMBER starts there:", len(result.tracks)))
+	m.notice(current, fmt.Sprintf("Music library (%d). Name a song by its number, its hash (the start is enough) or its name:", len(result.tracks)))
+	m.notice(current, "  /play [SONG]  plays the library from there   /save SONG|all [FOLDER]  keeps a song as a file")
 	for _, track := range result.tracks {
-		artist := track.Artist
-		if artist == "" {
-			artist = "unknown artist"
-		}
-		m.notice(current, fmt.Sprintf("  %-4d %s · %s · %s · @%s", track.ID, track.Title, artist, files.FormatSize(track.Size), track.Uploader))
+		m.notice(current, fmt.Sprintf("  #%-3d %s  %s  (%s, @%s)", track.ID, lookup.Short(track.MD5), music.FileName(track), files.FormatSize(track.Size), track.Uploader))
 	}
 }
 
-// playCommand handles /play and /play NUMBER.
+// playCommand handles /play and /play SONG, where SONG is a number, the start of a hash, or a name.
 func (m *Model) playCommand(current *groupState, argument string) {
-	var startID int64
-	if argument != "" && argument != "all" {
-		id, err := strconv.ParseInt(strings.TrimPrefix(argument, "#"), 10, 64)
-		if err != nil || id < 1 {
-			m.notice(current, "usage: /play  (the whole library)  or  /play NUMBER  (start there; see /music)")
-			return
-		}
-		startID = id
+	query := strings.TrimSpace(argument)
+	if query == "all" {
+		query = ""
 	}
 	if m.loadingMusic {
 		m.notice(current, "still loading the last track")
@@ -88,7 +81,7 @@ func (m *Model) playCommand(current *groupState, argument string) {
 	server := m.server
 	go func() {
 		tracks, err := server.Music()
-		server.report(musicStart{tracks: tracks, startID: startID, err: err})
+		server.report(musicStart{tracks: tracks, query: query, err: err})
 	}()
 }
 
@@ -104,8 +97,17 @@ func (m *Model) beginQueue(result musicStart) {
 		m.notice(current, "the library is empty; upload songs on the website, under Music")
 		return
 	}
+	var startID int64
+	if result.query != "" {
+		track, err := music.Find(result.tracks, result.query)
+		if err != nil {
+			m.notice(current, err.Error()+"; see /music")
+			return
+		}
+		startID = track.ID
+	}
 	m.stopMusic()
-	if err := m.list.Start(result.tracks, result.startID); err != nil {
+	if err := m.list.Start(result.tracks, startID); err != nil {
 		m.notice(current, err.Error())
 		return
 	}
@@ -126,6 +128,12 @@ func (m *Model) playAt() {
 	}
 	m.loadingMusic = true
 	server := m.server
+
+	// A song played before is on this computer: play that, with no network and free seeking.
+	if path, ok := music.Cached(track); ok {
+		go server.report(musicReady{track: track, source: path})
+		return
+	}
 
 	var proxy *music.Proxy
 	if launcher.Streams {
@@ -151,7 +159,7 @@ func (m *Model) playAt() {
 		path, err := music.CachePath(track)
 		if err == nil {
 			if info, statErr := os.Stat(path); statErr != nil || info.Size() != track.Size {
-				err = server.DownloadTrack(track.ID, path)
+				err = server.DownloadTrack(track.ID, path, nil)
 			}
 		}
 		server.report(musicReady{track: track, source: path, err: err})
@@ -280,10 +288,109 @@ func (m *Model) stopMusic() {
 }
 
 // reportShare tells the server about a file shared in a chat, for the website group's page.
-func (m *Model) reportShare(g *groupState, name string, size int64) {
+func (m *Model) reportShare(g *groupState, name string, size int64, hash string) {
 	if g == nil || g.secret == nil || g.direct {
 		return
 	}
 	id, server := g.secret.GIDHex(), m.server
-	m.server.enqueue(func() { server.ReportShare(id, name, size) })
+	m.server.enqueue(func() { server.ReportShare(id, name, size, hash) })
+}
+
+// musicSaved is the result of /save.
+type musicSaved struct {
+	dir   string
+	saved []string // the file names written
+	err   error
+}
+
+// saveCommand handles /save NUMBER|all [DIR]: keep songs from the library as ordinary files.
+func (m *Model) saveCommand(current *groupState, argument string) {
+	arguments := files.SplitArguments(argument)
+	if len(arguments) == 0 || len(arguments) > 2 {
+		m.notice(current, "usage: /save SONG [FOLDER]  or  /save all [FOLDER]  (SONG is a number, a hash or a name; see /music)")
+		return
+	}
+	query := arguments[0]
+	if m.busy {
+		m.notice(current, "another transfer is still running")
+		return
+	}
+	dir := defaultMusicDir()
+	if len(arguments) == 2 {
+		dir = files.ExpandHome(arguments[1])
+	}
+
+	m.busy, m.transfer = true, "saving music"
+	m.notice(current, "saving to "+dir+"...")
+	server := m.server
+	go func() {
+		result := musicSaved{dir: dir}
+		tracks, err := server.Music()
+		if err == nil {
+			var chosen []music.Track
+			if query == "all" {
+				chosen = tracks
+			} else if track, findErr := music.Find(tracks, query); findErr != nil {
+				err = fmt.Errorf("%w; see /music", findErr)
+			} else {
+				chosen = []music.Track{track}
+			}
+			if err == nil && len(chosen) == 0 {
+				err = fmt.Errorf("the library is empty")
+			}
+			if err == nil {
+				err = os.MkdirAll(dir, 0o755)
+			}
+			for index := 0; err == nil && index < len(chosen); index++ {
+				track := chosen[index]
+				name := track.Title
+				if len(chosen) > 1 {
+					name = fmt.Sprintf("%d/%d %s", index+1, len(chosen), track.Title)
+				}
+				path := music.UniquePath(dir, music.FileName(track))
+				err = server.DownloadTrack(track.ID, path, func(done, total int64) {
+					server.emit(files.Progress{Verb: "downloading", Name: name, Done: done, Total: total})
+				})
+				if err == nil {
+					result.saved = append(result.saved, filepath.Base(path))
+				}
+			}
+		}
+		result.err = err
+		server.report(result)
+	}()
+}
+
+// defaultMusicDir is where songs are saved when no folder is named: the Music folder if there is one.
+func defaultMusicDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, name := range []string{"Music", "Downloads"} {
+			if info, err := os.Stat(filepath.Join(home, name)); err == nil && info.IsDir() {
+				return filepath.Join(home, name)
+			}
+		}
+	}
+	return "."
+}
+
+// handleMusicSaved reports how /save went.
+func (m *Model) handleMusicSaved(result musicSaved) {
+	m.busy, m.transfer, m.progress = false, "", nil
+	m.layout()
+	current := m.groups[m.current]
+	switch {
+	case result.err != nil && len(result.saved) == 0:
+		m.notice(current, "could not save: "+result.err.Error())
+		return
+	case result.err != nil:
+		m.notice(current, "stopped early: "+result.err.Error())
+	}
+	where := result.dir
+	if abs, err := filepath.Abs(result.dir); err == nil {
+		where = abs
+	}
+	m.notice(current, fmt.Sprintf("saved %d song(s) to %s:", len(result.saved), where))
+	for _, name := range result.saved {
+		m.notice(current, "  "+name)
+	}
 }

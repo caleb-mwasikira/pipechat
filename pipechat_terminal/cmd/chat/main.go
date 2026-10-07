@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"pipechat/internal/client"
+	"pipechat/internal/client/update"
 )
 
 func main() {
@@ -29,9 +30,15 @@ func main() {
 	}
 	serverURL := flag.String("server", "", "chat server to use, for example https://chat.example.com (default: the one from last time)")
 	storePath := flag.String("store", defaultStorePath, "file that remembers your server and last handle")
+	showVersion := flag.Bool("version", false, "print the version of this program and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("pipechat " + update.Current)
+		return
+	}
+	update.Cleanup() // what an earlier update left beside the program
 	if flag.NArg() > 0 {
-		fmt.Fprintln(os.Stderr, "usage: chat [--server URL] [--store FILE]")
+		fmt.Fprintln(os.Stderr, "usage: chat [--server URL] [--store FILE] [--version]")
 		os.Exit(2)
 	}
 
@@ -51,5 +58,14 @@ func main() {
 	// 5. Run.
 	if _, err := program.Run(); err != nil {
 		log.Fatalf("screen: %v", err)
+	}
+
+	// 6. After an update, start the new program in place of this one.
+	if exe := screen.RestartExe(); exe != "" {
+		fmt.Println("Updated. Starting the new version...")
+		if err := update.Restart(exe, os.Args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "updated, but could not start the new version (%v); run %s again\n", err, exe)
+			os.Exit(1)
+		}
 	}
 }

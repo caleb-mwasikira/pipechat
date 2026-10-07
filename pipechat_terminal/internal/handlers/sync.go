@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -232,6 +234,8 @@ func syncKick(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+var md5Pattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+
 // POST /api/sync/shares: a member shared a file in a chat. If it is a website group, its page lists the file
 // (name and size only: the file itself stays encrypted and its key is only in the link in the chat).
 func syncShare(w http.ResponseWriter, r *http.Request) {
@@ -239,12 +243,12 @@ func syncShare(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &request) {
 		return
 	}
-	if !groupIDPattern.MatchString(request.GID) || request.Name == "" || len(request.Name) > 80 || request.Size < 0 {
+	if !groupIDPattern.MatchString(request.GID) || request.Name == "" || len(request.Name) > 80 || request.Size < 0 || (request.MD5 != "" && !md5Pattern.MatchString(request.MD5)) {
 		writeError(w, http.StatusBadRequest, "bad share")
 		return
 	}
 	expires := time.Now().Add(time.Duration(Config.FileDays) * 24 * time.Hour)
-	ok, err := database.RecordShare(r.Context(), Pool, currentSession(r).userID, request.GID, request.Name, request.Size, expires)
+	ok, err := database.RecordShare(r.Context(), Pool, currentSession(r).userID, request.GID, request.Name, request.Size, strings.ToLower(request.MD5), expires)
 	if err != nil {
 		serverError(w, "record share", err)
 		return

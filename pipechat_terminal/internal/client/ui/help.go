@@ -1,10 +1,14 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"pipechat/internal/client/files"
+	"pipechat/internal/client/search"
 )
 
 // One help entry: what to type, and what it does.
@@ -45,13 +49,20 @@ var helpSections = []helpSection{
 		{"/music", "list the shared music library (upload on the website)"},
 		{"/play", "stream the whole library, one song after another"},
 		{"/play NUMBER", "start from that track, then carry on"},
+		{"/save NUMBER|all [DIR]", "keep songs from the library as files (default: your Music folder)"},
 		{"/next · /stop", "skip to the next song · stop the music"},
 		{"/shuffle [on|off]", "play in random order"},
 		{"/repeat off|one|all", "repeat nothing, this song, or the whole library"},
 	}},
+	{"Search", []helpItem{
+		{"/search TEXT", "find TEXT in every chat (also the groups you closed)"},
+		{"/search -here TEXT", "only in the chat you are in"},
+		{"/search -in CHAT TEXT", "only in one chat (quote a name with spaces)"},
+	}},
 	{"Screen", []helpItem{
 		{"/clear", "clear this chat's messages from view"},
 		{"/help", "show this guide"},
+		{"/update", "check for a newer version and offer to install it"},
 		{"/exit", "quit (/quit works too)"},
 	}},
 }
@@ -164,6 +175,82 @@ func ProfilePage(width int, p Profile, own bool, fingerprint string, keyCheck st
 		out = append(out, "", Dim.Render("  Change your bio with /bio TEXT, or on the website under Profile."))
 	} else {
 		out = append(out, "", Dim.Render("  Start a private chat with /dm "+p.Handle+"."))
+	}
+	return strings.Join(out, "\n")
+}
+
+// UpdatePrompt is the page offering a new version of the program.
+func UpdatePrompt(width int, current string, latest string, size int64, checksum string) string {
+	label := lipgloss.NewStyle().Width(16).Foreground(lipgloss.Color("244"))
+	row := func(key string, value string) string { return "  " + label.Render(key) + Text.Render(value) }
+	wrap := lipgloss.NewStyle().Width(max(20, width-4))
+
+	out := []string{
+		Brand.Render("A new version of Pipechat is ready"),
+		"",
+		row("You have", "v"+strings.TrimPrefix(current, "v")),
+		row("Newest", Active.Render("v"+strings.TrimPrefix(latest, "v"))),
+	}
+	if size > 0 {
+		out = append(out, row("Download", files.FormatSize(size)))
+	}
+	if checksum != "" {
+		out = append(out, row("SHA-256", Truncate(checksum, max(20, width-20))))
+	}
+	out = append(out, "",
+		"  "+strings.ReplaceAll(wrap.Render(Text.Render("Updating downloads the new program, checks it, replaces this one, and starts it again. Your chats, groups and settings are not touched; you only log in again.")), "\n", "\n  "),
+		"",
+		"  "+Key.Render("Y")+Dim.Render("  update now"),
+		"  "+Key.Render("N")+Dim.Render("  not now; ask me again next time"),
+		"  "+Key.Render("S")+Dim.Render("  skip this version"),
+		"",
+		Dim.Render("  You can check any time with /update."),
+	)
+	return strings.Join(out, "\n")
+}
+
+// SearchGroup is the matches found in one chat.
+type SearchGroup struct {
+	Chat string
+	Hits []search.Hit
+}
+
+// SearchResults draws what /search found, grouped by chat, with the matching words marked.
+func SearchResults(width int, query string, groups []SearchGroup, total int, shown int) string {
+	marked := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(lipgloss.Color("222"))
+	wrap := lipgloss.NewStyle().Width(max(20, width-6))
+
+	var out []string
+	found := fmt.Sprintf("%d match", total)
+	if total != 1 {
+		found += "es"
+	}
+	out = append(out, Brand.Render("Search: ")+Active.Render(query), Dim.Render(found+" in "+fmt.Sprint(len(groups))+" chat(s)"), "")
+	if total == 0 {
+		return strings.Join(append(out, Dim.Render("  Nothing said in these chats contains that text.")), "\n")
+	}
+	for _, group := range groups {
+		out = append(out, Heading.Render(group.Chat)+Dim.Render(fmt.Sprintf("  (%d)", len(group.Hits))))
+		lastDay := ""
+		for _, hit := range group.Hits {
+			day := hit.When.Format("2 Jan 2006")
+			stamp := hit.When.Format("15:04")
+			if day != lastDay {
+				out = append(out, "  "+Dim.Render(day))
+				lastDay = day
+			}
+			who := Dim.Render("·")
+			if hit.Handle != "" {
+				who = Other.Render("@" + hit.Handle)
+			}
+			text := hit.Text[:hit.Start] + marked.Render(hit.Text[hit.Start:hit.End]) + hit.Text[hit.End:]
+			line := Dim.Render(stamp) + " " + who + "  " + Text.Render(text)
+			out = append(out, "    "+strings.ReplaceAll(wrap.Render(line), "\n", "\n        "))
+		}
+		out = append(out, "")
+	}
+	if shown < total {
+		out = append(out, Dim.Render(fmt.Sprintf("  Showing the first %d of %d. Search for more of the words to narrow it down.", shown, total)))
 	}
 	return strings.Join(out, "\n")
 }
