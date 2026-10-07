@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Mail\Welcome;
 use App\Models\User;
+use App\Support\SafeMail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -19,7 +21,9 @@ class AuthController extends Controller
             'password' => ['required', 'confirmed', Password::min(8)],
         ]);
 
-        Auth::login(User::create($data));
+        $user = User::create($data);
+        Auth::login($user);
+        SafeMail::to($user, new Welcome($user));
         $request->session()->regenerate();
 
         return redirect()->route('download');

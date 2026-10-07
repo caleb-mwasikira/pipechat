@@ -2,7 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Mail\GroupInvite;
+use App\Mail\InviteAccepted;
 use App\Models\User;
+use App\Support\SafeMail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -79,6 +82,8 @@ class GroupController extends Controller
                 'created_at' => now(), 'updated_at' => now()],
         ], ['group_id', 'invitee_id'], ['inviter_id', 'status', 'updated_at']);
 
+        SafeMail::to($invitee, new GroupInvite($user, DB::table('chat_groups')->where('id', $group)->value('name')));
+
         return back()->with('status', "Invitation sent to @{$invitee->handle}.");
     }
 
@@ -100,6 +105,10 @@ class GroupController extends Controller
                 ]);
             }
         });
+
+        if ($answer === 'accept' && ($inviter = User::find($row->inviter_id))) {
+            SafeMail::to($inviter, new InviteAccepted($user, DB::table('chat_groups')->where('id', $row->group_id)->value('name')));
+        }
 
         return back()->with('status', $answer === 'accept'
             ? 'Joined. The group appears in your terminal once another member is online to share its key.'
