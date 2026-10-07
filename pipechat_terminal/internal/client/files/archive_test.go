@@ -133,6 +133,16 @@ func TestParseLink(t *testing.T) {
 	}
 }
 
+func TestFileIDIsTheStoredFileBehindALink(t *testing.T) {
+	_, keyText := func() ([]byte, string) { k, s, _ := crypto.NewFileKey(); return k, s }()
+	if got := FileID("http://host/api/files/0123456789abcdef0123456789abcdef#" + keyText); got != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("id: %q", got)
+	}
+	if got := FileID("not a link"); got != "" {
+		t.Fatalf("a bad link has no id: %q", got)
+	}
+}
+
 // A single file's hash is the one "md5sum" prints for it, so people can check it themselves.
 func TestASingleFileIsHashedByItsOwnBytes(t *testing.T) {
 	content := bytes.Repeat([]byte("hello hash\n"), 5000)

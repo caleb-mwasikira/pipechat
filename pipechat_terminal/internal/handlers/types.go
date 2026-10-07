@@ -106,4 +106,5 @@ type shareRequest struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
 	MD5  string `json:"md5"`
+	File string `json:"file,omitempty"` // the stored file behind the share, so it can be deleted
 }

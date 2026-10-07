@@ -455,6 +455,14 @@ func (m *Model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case fileDeleted:
+		m.fileDeleted(message)
+		return m, nil
+
+	case trackDeleted:
+		m.trackDeleted(message)
+		return m, nil
+
 	case musicList:
 		return m, m.showMusic(message)
 
@@ -1483,6 +1491,12 @@ func (m *Model) runCommand(text string) tea.Cmd {
 	case "/open":
 		return m.startOpen(current, argument)
 
+	case "/delete":
+		m.deleteCommand(current, argument)
+
+	case "/delete-music":
+		m.deleteMusicCommand(current, argument)
+
 	case "/files":
 		return m.showShared()
 
@@ -1504,7 +1518,7 @@ func (m *Model) runCommand(text string) tea.Cmd {
 			if err := m.send(current, payload{Kind: "file", Handle: m.session.handle, Name: file.Name, Link: file.Link, Size: file.Size, Hash: file.Hash}); err != nil {
 				m.notice(current, "not sent: "+err.Error())
 			} else {
-				m.reportShare(current, file.Name, file.Size, file.Hash)
+				m.reportShare(current, file.Name, file.Size, file.Hash, file.Link)
 			}
 		}
 
@@ -1846,7 +1860,7 @@ func (m *Model) finishUpload(result files.Done) {
 		return
 	}
 	m.notice(target, summary)
-	m.reportShare(target, result.Name, result.Bytes, result.Hash)
+	m.reportShare(target, result.Name, result.Bytes, result.Hash, result.Link)
 	if err := m.send(target, payload{Kind: "file", Handle: m.session.handle, Name: result.Name, Link: result.Link, Size: result.Bytes, Hash: result.Hash}); err != nil {
 		m.notice(target, "link not sent: "+err.Error()+" (use /share "+result.Name+" later)")
 	}

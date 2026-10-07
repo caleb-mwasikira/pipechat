@@ -38,3 +38,15 @@ func serveStored(w http.ResponseWriter, r *http.Request, relative string, conten
 	}
 	http.ServeContent(w, r, "", info.ModTime(), file)
 }
+
+// removeStored deletes a file from the website's storage folder, with the same care about staying inside it.
+func removeStored(relative string) {
+	root, err := filepath.Abs(Config.StorageDir)
+	if err != nil {
+		return
+	}
+	full := filepath.Join(root, filepath.Clean("/"+relative))
+	if strings.HasPrefix(full, root+string(filepath.Separator)) {
+		os.Remove(full)
+	}
+}

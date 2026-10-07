@@ -92,3 +92,25 @@ func CleanFiles() {
 		time.Sleep(time.Hour)
 	}
 }
+
+// DELETE /api/files/{id}: the person who uploaded a file, or the owner of the website group it was shared in,
+// deletes it. Everyone else gets a refusal.
+func deleteFile(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if !fileIDPattern.MatchString(id) {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	own := currentSession(r)
+	switch err := database.DeleteSharedFile(r.Context(), Pool, own.userID, own.handle, id); {
+	case errors.Is(err, database.ErrNoSuchFile):
+		writeError(w, http.StatusNotFound, "file not found; it may have expired")
+	case errors.Is(err, database.ErrNotAllowed):
+		writeError(w, http.StatusForbidden, err.Error())
+	case err != nil:
+		serverError(w, "delete file", err)
+	default:
+		os.Remove(filepath.Join(Config.FilesDir, id))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

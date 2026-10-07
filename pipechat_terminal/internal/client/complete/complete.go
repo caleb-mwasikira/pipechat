@@ -18,7 +18,7 @@ var Commands = []string{
 	"/groups", "/switch ", "/close", "/closed", "/reopen ", "/code", "/invite ", "/kick ", "/leave",
 	"/music", "/play", "/play all", "/save ", "/save all ", "/next", "/stop", "/shuffle on", "/shuffle off",
 	"/repeat off", "/repeat one", "/repeat all", "/unlist ",
-	"/upload ", "/download ", "/open ", "/files", "/link ", "/share ", "/search ", "/search -here ", "/search -in ", "/clear", "/mouse on", "/mouse off", "/update", "/sh ", "/shell", "/chat", "/exit", "/quit",
+	"/upload ", "/download ", "/open ", "/files", "/delete ", "/delete-music ", "/link ", "/share ", "/search ", "/search -here ", "/search -in ", "/clear", "/mouse on", "/mouse off", "/update", "/sh ", "/shell", "/chat", "/exit", "/quit",
 }
 
 // Paths completes the path being typed after /upload (the file or folder) or /download (the folder to

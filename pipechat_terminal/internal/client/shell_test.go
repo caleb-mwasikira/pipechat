@@ -137,3 +137,17 @@ func TestTabCompletesInTheShell(t *testing.T) {
 		t.Fatalf("names with spaces are escaped: %q", m.input.Value())
 	}
 }
+
+func TestDeleteCommandsExplainThemselvesAndRefuseUnknownFiles(t *testing.T) {
+	m := loggedInModel(t)
+	current := m.groups[m.current]
+	m.deleteCommand(current, "")
+	m.deleteCommand(current, "nothing-here")
+	m.deleteMusicCommand(current, "")
+	text := entriesText(current)
+	for _, want := range []string{"usage: /delete NAME", "no shared files yet", "usage: /delete-music"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+}

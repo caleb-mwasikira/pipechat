@@ -243,12 +243,12 @@ func syncShare(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &request) {
 		return
 	}
-	if !groupIDPattern.MatchString(request.GID) || request.Name == "" || len(request.Name) > 80 || request.Size < 0 || (request.MD5 != "" && !md5Pattern.MatchString(request.MD5)) {
+	if !groupIDPattern.MatchString(request.GID) || request.Name == "" || len(request.Name) > 80 || request.Size < 0 || (request.MD5 != "" && !md5Pattern.MatchString(request.MD5)) || (request.File != "" && !fileIDPattern.MatchString(request.File)) {
 		writeError(w, http.StatusBadRequest, "bad share")
 		return
 	}
 	expires := time.Now().Add(time.Duration(Config.FileDays) * 24 * time.Hour)
-	ok, err := database.RecordShare(r.Context(), Pool, currentSession(r).userID, request.GID, request.Name, request.Size, strings.ToLower(request.MD5), expires)
+	ok, err := database.RecordShare(r.Context(), Pool, currentSession(r).userID, request.GID, request.Name, request.Size, strings.ToLower(request.MD5), request.File, expires)
 	if err != nil {
 		serverError(w, "record share", err)
 		return

@@ -34,13 +34,13 @@ import (
 )
 
 const websiteSchema = `
-CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, bio TEXT, remember_token TEXT, created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
+CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, bio TEXT, remember_token TEXT, is_admin BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMP, updated_at TIMESTAMP, UNIQUE (group_id, user_id));
 CREATE TABLE chat_group_invite_codes (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), code TEXT NOT NULL UNIQUE, uses INT NOT NULL DEFAULT 0, max_uses INT NOT NULL DEFAULT 25, expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP, updated_at TIMESTAMP);
 CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
 CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, uploaded_by BIGINT REFERENCES users(id));
-CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, expires_at TIMESTAMP, created_at TIMESTAMP);
+CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT, file_id TEXT, expires_at TIMESTAMP, created_at TIMESTAMP);
 CREATE TABLE binaries (id BIGSERIAL PRIMARY KEY, os TEXT NOT NULL, arch TEXT NOT NULL, version TEXT NOT NULL, filename TEXT NOT NULL, path TEXT NOT NULL, size BIGINT NOT NULL, md5 TEXT NOT NULL, sha256 TEXT NOT NULL);
 CREATE TABLE password_reset_tokens (email TEXT PRIMARY KEY, token TEXT NOT NULL, created_at TIMESTAMP);
 CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id BIGINT);

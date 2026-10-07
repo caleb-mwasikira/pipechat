@@ -42,3 +42,34 @@ func GetTrack(ctx context.Context, pool *sql.DB, id int64) (*Track, error) {
 	}
 	return &t, err
 }
+
+// DeleteTrack removes a song from the library if the person asking uploaded it or is an administrator.
+// It returns the stored file's path when no other track uses it, for the caller to remove from disk.
+func DeleteTrack(ctx context.Context, pool *sql.DB, userID int64, id int64) (path string, removeFile bool, err error) {
+	var uploader sql.NullInt64
+	if err := pool.QueryRowContext(ctx, `SELECT path, uploaded_by FROM tracks WHERE id = $1`, id).Scan(&path, &uploader); errors.Is(err, sql.ErrNoRows) {
+		return "", false, ErrNoSuchFile
+	} else if err != nil {
+		return "", false, err
+	}
+	var admin bool
+	if err := pool.QueryRowContext(ctx, `SELECT COALESCE(is_admin, false) FROM users WHERE id = $1`, userID).Scan(&admin); err != nil {
+		return "", false, err
+	}
+	if !admin && !(uploader.Valid && uploader.Int64 == userID) {
+		return "", false, ErrNotAllowed
+	}
+	transaction, err := pool.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, err
+	}
+	defer transaction.Rollback()
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM tracks WHERE id = $1`, id); err != nil {
+		return "", false, err
+	}
+	var others int
+	if err := transaction.QueryRowContext(ctx, `SELECT count(*) FROM tracks WHERE path = $1`, path).Scan(&others); err != nil {
+		return "", false, err
+	}
+	return path, others == 0, transaction.Commit()
+}

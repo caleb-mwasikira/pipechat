@@ -96,3 +96,16 @@ func ParseLink(link string) (address string, key []byte, err error) {
 	parsed.Fragment, parsed.RawQuery = "", ""
 	return parsed.String(), key, nil
 }
+
+// FileID is the id of the stored file a share link points to, or "" when the link is not one.
+func FileID(link string) string {
+	address, _, err := ParseLink(link)
+	if err != nil {
+		return ""
+	}
+	id := address[strings.LastIndex(address, "/")+1:]
+	if len(id) != 32 {
+		return ""
+	}
+	return id
+}

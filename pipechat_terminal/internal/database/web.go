@@ -404,13 +404,13 @@ func SetPresence(ctx context.Context, pool *sql.DB, handle string, online bool) 
 
 // RecordShare notes that a member shared a file in a website group, for the group's page. It returns false
 // when the chat is not a website group, or the person is not in it.
-func RecordShare(ctx context.Context, pool *sql.DB, userID int64, gid string, name string, size int64, hash string, expires time.Time) (bool, error) {
+func RecordShare(ctx context.Context, pool *sql.DB, userID int64, gid string, name string, size int64, hash string, fileID string, expires time.Time) (bool, error) {
 	result, err := pool.ExecContext(ctx, `
-		INSERT INTO chat_group_files (group_id, user_id, name, size, md5, expires_at, created_at)
-		SELECT g.id, $1, $3, $4, NULLIF($5, ''), $6, (now() AT TIME ZONE 'UTC')
+		INSERT INTO chat_group_files (group_id, user_id, name, size, md5, file_id, expires_at, created_at)
+		SELECT g.id, $1, $3, $4, NULLIF($5, ''), NULLIF($7, ''), $6, (now() AT TIME ZONE 'UTC')
 		FROM chat_groups g
 		JOIN chat_group_members m ON m.group_id = g.id AND m.user_id = $1
-		WHERE g.gid = $2`, userID, gid, name, size, hash, expires.UTC())
+		WHERE g.gid = $2`, userID, gid, name, size, hash, expires.UTC(), fileID)
 	if err != nil {
 		return false, err
 	}

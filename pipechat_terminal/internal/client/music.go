@@ -289,12 +289,13 @@ func (m *Model) stopMusic() {
 }
 
 // reportShare tells the server about a file shared in a chat, for the website group's page.
-func (m *Model) reportShare(g *groupState, name string, size int64, hash string) {
+func (m *Model) reportShare(g *groupState, name string, size int64, hash string, link string) {
 	if g == nil || g.secret == nil || g.direct {
 		return
 	}
 	id, server := g.secret.GIDHex(), m.server
-	m.server.enqueue(func() { server.ReportShare(id, name, size, hash) })
+	file := files.FileID(link)
+	m.server.enqueue(func() { server.ReportShare(id, name, size, hash, file) })
 }
 
 // musicSaved is the result of /save.

@@ -468,8 +468,19 @@ func (s *Server) Online(groupID string) ([]string, error) {
 
 // ReportShare tells the server a file was shared in a chat, so a website group's page can list it.
 // It is best effort: chats that are not website groups answer 404, which is fine.
-func (s *Server) ReportShare(groupID string, name string, size int64, hash string) {
-	s.call("POST", "/api/sync/shares", map[string]any{"gid": groupID, "name": name, "size": size, "md5": hash}, nil)
+func (s *Server) ReportShare(groupID string, name string, size int64, hash string, file string) {
+	s.call("POST", "/api/sync/shares", map[string]any{"gid": groupID, "name": name, "size": size, "md5": hash, "file": file}, nil)
+}
+
+// DeleteFile deletes a stored file. Only the person who uploaded it, or the owner of the website group it was
+// shared in, is allowed.
+func (s *Server) DeleteFile(id string) error {
+	return s.call("DELETE", "/api/files/"+id, nil, nil)
+}
+
+// DeleteTrack deletes a song from the library. Only the person who uploaded it, or an administrator, is allowed.
+func (s *Server) DeleteTrack(id int64) error {
+	return s.call("DELETE", "/api/music/"+strconv.FormatInt(id, 10), nil, nil)
 }
 
 // progressReader reports how many bytes have been read through it.

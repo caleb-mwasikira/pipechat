@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -53,4 +54,27 @@ func musicFile(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	serveStored(w, r, track.Path, contentType, "")
+}
+
+// DELETE /api/music/{id}: the person who uploaded the song, or an administrator, takes it out of the library.
+func deleteTrack(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad track")
+		return
+	}
+	path, removeFile, err := database.DeleteTrack(r.Context(), Pool, currentSession(r).userID, id)
+	switch {
+	case errors.Is(err, database.ErrNoSuchFile):
+		writeError(w, http.StatusNotFound, "no such track")
+	case errors.Is(err, database.ErrNotAllowed):
+		writeError(w, http.StatusForbidden, "only the person who uploaded this song, or an administrator, can delete it")
+	case err != nil:
+		serverError(w, "delete track", err)
+	default:
+		if removeFile {
+			removeStored(path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
