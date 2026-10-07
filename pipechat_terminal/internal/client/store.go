@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 )
 
-// Store is what the client remembers between runs: which server, and who logged in last. Secrets are not in it: the
-// group codes live in the account's encrypted vault on the server.
+// Store is what the client remembers between runs: which server, who logged in last, and the messages shown in
+// each chat (sealed, see history.go). Secrets are not in it: the group codes live in the account's encrypted
+// vault on the server.
 type Store struct {
 	path      string
-	ServerURL string            `json:"server_url"` // the chat server connected to last time
-	LastEmail string            `json:"last_email"` // pre-fills the login screen
-	LastSeq   map[string]uint64 `json:"last_seq"`   // group id -> newest message already shown
+	ServerURL string   `json:"server_url"` // the chat server connected to last time
+	LastEmail string   `json:"last_email"` // pre-fills the login screen
+	History   *History `json:"-"`          // the messages shown in each chat, kept between runs (history.jsonl)
 }
 
 // DefaultStorePath is ~/.config/pipechat/client.json (or the platform equivalent).
@@ -38,9 +39,11 @@ func LoadStore(path string) (*Store, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if store.LastSeq == nil {
-		store.LastSeq = map[string]uint64{}
+	history, err := LoadHistory(filepath.Join(filepath.Dir(path), "history.jsonl"))
+	if err != nil {
+		return nil, err
 	}
+	store.History = history
 	return store, nil
 }
 

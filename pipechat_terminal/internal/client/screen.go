@@ -253,7 +253,6 @@ func (m *Model) serverAnswered() {
 		// A different server has different accounts.
 		m.store.ServerURL = m.server.URL()
 		m.store.LastEmail = ""
-		m.store.LastSeq = map[string]uint64{}
 		m.showLogin()
 	}
 	m.store.Save()
@@ -701,7 +700,9 @@ func (m *Model) loadVault(sealed []byte) {
 	m.identity = identity
 	for _, code := range saved.Groups {
 		if secret, err := crypto.ParseCode(code); err == nil {
-			m.groups = append(m.groups, &groupState{secret: secret})
+			group := &groupState{secret: secret}
+			m.groups = append(m.groups, group)
+			m.replayHistory(group)
 		}
 	}
 }
@@ -736,8 +737,15 @@ func appendMissing(list []string, item string) []string {
 	return append(list, item)
 }
 
+// seqKey names where the newest message seen in a group is remembered. It includes the
+// handle because several people can use one computer, and a direct chat has the same id for
+// both of them: what one person has read says nothing about what the other has.
+func (m *Model) seqKey(groupID string) string {
+	return m.session.handle + "/" + groupID
+}
+
 func (m *Model) joinGroupAsync(g *groupState) {
-	id, token, since := g.secret.GIDHex(), g.secret.JoinToken(), m.store.LastSeq[g.secret.GIDHex()]
+	id, token, since := g.secret.GIDHex(), g.secret.JoinToken(), m.store.History.Last(m.seqKey(g.secret.GIDHex()))
 	if err := m.server.enqueue(func() {
 		messages, err := m.server.JoinGroup(id, token, since)
 		m.server.report(joinResult{group: g, messages: messages, err: err})
@@ -805,6 +813,7 @@ func (m *Model) openDirect(peer string, publicKey string) {
 
 	g := &groupState{secret: secret, adding: true, direct: true, peer: peer, notify: notify}
 	m.groups = append(m.groups, g)
+	m.replayHistory(g)
 	m.createGroupAsync(g)
 	if notify {
 		m.switchTo(len(m.groups) - 1)
@@ -826,7 +835,7 @@ func (m *Model) findGroup(id string) *groupState {
 // droppedFromGroup forgets a group the creator removed us from.
 func (m *Model) droppedFromGroup(g *groupState) {
 	name := g.secret.Name
-	delete(m.store.LastSeq, g.secret.GIDHex())
+	m.store.History.Forget(m.seqKey(g.secret.GIDHex()))
 	m.removeGroup(g)
 	m.saveVault()
 	m.notice(m.groups[0], "You were removed from the group "+name+" by its creator.")
@@ -845,7 +854,19 @@ func (m *Model) removeGroup(target *groupState) {
 	}
 }
 
-func (m *Model) receive(frame Event) {
+func (m *Model) receive(frame Event) { m.receiveMessage(frame, false) }
+
+// replayHistory shows a chat's messages saved by an earlier run.
+func (m *Model) replayHistory(g *groupState) {
+	key := m.seqKey(g.secret.GIDHex())
+	for _, saved := range m.store.History.Messages(key) {
+		m.receiveMessage(Event{Type: "msg", GID: g.secret.GIDHex(), CT: saved.CT, Seq: saved.Seq, TS: saved.TS}, true)
+	}
+}
+
+// receiveMessage shows one message. replay is true for one saved earlier: it is not saved again,
+// does not count as unread, and does not touch the list of shared files.
+func (m *Model) receiveMessage(frame Event, replay bool) {
 	g := m.findGroup(frame.GID)
 	if g == nil || g.seen[frame.Seq] {
 		return
@@ -854,9 +875,8 @@ func (m *Model) receive(frame Event) {
 		g.seen = map[uint64]bool{}
 	}
 	g.seen[frame.Seq] = true
-	if frame.Seq > m.store.LastSeq[frame.GID] {
-		m.store.LastSeq[frame.GID] = frame.Seq
-		m.store.Save()
+	if !replay {
+		m.store.History.Add(m.seqKey(frame.GID), frame.Seq, frame.TS, frame.CT)
 	}
 
 	line := entry{when: time.UnixMilli(frame.TS), seq: frame.Seq}
@@ -874,7 +894,7 @@ func (m *Model) receive(frame Event) {
 				line.text = "[invalid file share]"
 			} else {
 				line.text = fmt.Sprintf("@%s shared \"%s\" (%s). Download with: /download %s DIR", cleanText(content.Handle), content.Name, formatSize(content.Size), content.Name)
-				if !line.self {
+				if !line.self && !replay {
 					m.rememberFile(content.Name, fileRecord{Link: content.Link, Size: content.Size, From: cleanText(content.Handle), At: time.Now().Unix()})
 				}
 			}
@@ -891,7 +911,7 @@ func (m *Model) receive(frame Event) {
 	g.entries = append(g.entries, entry{})
 	copy(g.entries[position+1:], g.entries[position:])
 	g.entries[position] = line
-	if g != m.groups[m.current] {
+	if !replay && g != m.groups[m.current] {
 		g.unread++
 	}
 }
@@ -1004,8 +1024,11 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		return tea.Quit
 
 	case "/clear":
-		// Only clears what is shown. The messages are not deleted, and are not shown again.
+		// Only clears what is shown: the messages stay in the group for the others, and are not shown here again.
 		current.entries = nil
+		if current.secret != nil {
+			m.store.History.Clear(m.seqKey(current.secret.GIDHex()))
+		}
 		m.refresh()
 
 	case "/create":
@@ -1162,7 +1185,7 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		}
 		id := current.secret.GIDHex()
 		m.server.enqueue(func() { m.server.LeaveGroup(id) })
-		delete(m.store.LastSeq, id)
+		m.store.History.Forget(m.seqKey(id))
 		if current.direct {
 			peer := current.peer
 			m.server.enqueue(func() { m.server.ClearDirect(peer) })

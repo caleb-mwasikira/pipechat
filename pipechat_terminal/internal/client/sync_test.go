@@ -37,6 +37,12 @@ type terminal struct {
 
 func newTerminal(t *testing.T, url string, email string) *terminal {
 	store, _ := LoadStore(filepath.Join(t.TempDir(), "client.json"))
+	return newTerminalWithStore(t, url, email, store)
+}
+
+// newTerminalWithStore is a terminal on a computer whose settings file is already there, as when
+// someone logs in again, or a second person uses the same machine.
+func newTerminalWithStore(t *testing.T, url string, email string, store *Store) *terminal {
 	m := NewModel(store, "")
 	term := &terminal{t: t, m: m, messages: make(chan tea.Msg, 100)}
 	m.server = NewServer(url)
@@ -215,4 +221,50 @@ func TestKickedMemberLosesTheGroup(t *testing.T) {
 	if len(bob2.m.groups) != 1 {
 		t.Fatalf("a removed member got the group back on login: %d groups", len(bob2.m.groups))
 	}
+}
+
+func (term *terminal) said() string {
+	var all []string
+	for _, g := range term.m.groups[1:] {
+		for _, line := range g.entries {
+			all = append(all, line.text)
+		}
+	}
+	return strings.Join(all, "\n")
+}
+
+// Messages sent while someone was away are there when they log in again, and what one person
+// has read on a shared computer does not hide messages from the next person.
+func TestMessagesSentWhileAwayArriveAtLogin(t *testing.T) {
+	alice, bob := websiteGroupFlow(t, true)
+	url := alice.m.server.URL()
+	bobsStore := bob.m.store
+
+	// Bob closes the terminal. Alice keeps talking.
+	bob.m.server.Stop()
+	for _, body := range []string{"first while you were away", "second while you were away"} {
+		if err := alice.m.send(alice.m.groups[1], payload{Kind: "msg", Handle: "alice", Body: body}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The test has no WebSocket, so give the server a moment to store them.
+	time.Sleep(time.Second)
+
+	// Bob logs in again on the same computer: he gets exactly what he missed.
+	bobAgain := newTerminalWithStore(t, url, "bob@example.com", bobsStore)
+	bobAgain.until("the missed messages", func() bool { return strings.Contains(bobAgain.said(), "second while you were away") })
+	if !strings.Contains(bobAgain.said(), "first while you were away") {
+		t.Fatal("only some of the missed messages arrived")
+	}
+
+	// Closing and reopening the terminal brings back what was already read, with nothing new from the server.
+	bobAgain.m.server.Stop()
+	bobThird := newTerminalWithStore(t, url, "bob@example.com", bobsStore)
+	if !strings.Contains(bobThird.said(), "first while you were away") || !strings.Contains(bobThird.said(), "second while you were away") {
+		t.Fatalf("earlier messages should come back from the saved history:\n%s", bobThird.said())
+	}
+
+	// Alice now uses Bob's computer. His settings must not make her miss anything.
+	aliceThere := newTerminalWithStore(t, url, "alice@example.com", bobsStore)
+	aliceThere.until("alice's whole history", func() bool { return strings.Contains(aliceThere.said(), "first while you were away") })
 }

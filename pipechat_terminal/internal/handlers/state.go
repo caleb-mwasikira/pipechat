@@ -18,7 +18,7 @@ var (
 
 const (
 	historyKept           = 1000 // messages kept per group
-	historySent           = 500  // most messages sent to someone joining
+	historySent           = 1000 // most messages sent to someone joining: everything that is kept
 	groupsLimit           = 10000
 	groupsPerSessionLimit = 50
 	accountsLimit         = 10000
