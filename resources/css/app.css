@@ -20,6 +20,7 @@
 }
 
 body {
+    visibility: visible;
     font-family: 'JetBrains Mono', monospace;
     background-color: var(--color-cyber-900);
     color: #e5e7eb;

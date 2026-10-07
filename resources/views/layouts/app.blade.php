@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>@hasSection('title')@yield('title') // @endif{{ config('app.name') }} // Terminal chat</title>
+    {{-- Keep the page hidden (on the theme's dark background) until app.css has applied, so unstyled HTML never shows. app.css sets body back to visible. --}}
+    <style>html{background:#030712}body{visibility:hidden}html.show body{visibility:visible!important}</style>
+    <noscript><style>body{visibility:visible}</style></noscript>
+    <script>setTimeout(function(){document.documentElement.classList.add('show')},3000)</script>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="icon" href="/favicon.ico" sizes="48x48">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
