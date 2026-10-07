@@ -19,6 +19,11 @@ class AdminBinaryController extends Controller
         ]);
     }
 
+    public function create()
+    {
+        return view('admin-binaries-upload');
+    }
+
     public function store(Request $request): RedirectResponse
     {
         $data = $request->validate([
@@ -42,7 +47,7 @@ class AdminBinaryController extends Controller
             'uploaded_by' => $request->user()->id, 'created_at' => now(), 'updated_at' => now(),
         ]);
 
-        return back()->with('status', "Uploaded $filename.");
+        return redirect()->route('admin.binaries')->with('status', "Uploaded $filename.");
     }
 
     public function destroy(int $binary): RedirectResponse

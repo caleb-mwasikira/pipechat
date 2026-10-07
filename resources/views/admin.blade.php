@@ -1,12 +1,10 @@
 @extends('layouts.app')
 @section('title', 'Admin')
-@section('container', 'max-w-6xl')
 @section('content')
 @php $max = max(1, $signups->max('count')); @endphp
 <div class="mb-8">
     <p class="font-mono text-xs uppercase tracking-[0.2em] text-cyber-neon">// admin</p>
     <h1 class="font-mono text-3xl font-black text-white">Dashboard</h1>
-    <a href="{{ route('admin.binaries') }}" class="font-mono text-xs text-cyber-neon hover:underline"><i class="fa-solid fa-box-archive mr-1"></i>Manage binaries</a>
 </div>
 
 <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

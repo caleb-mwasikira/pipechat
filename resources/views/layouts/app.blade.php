@@ -31,30 +31,67 @@
                 <span class="font-mono text-lg font-black tracking-tight text-white">{{ config('app.name') }}<span class="text-cyber-neon">.</span></span>
             </a>
 
-            <div class="flex shrink-0 items-center gap-2 sm:gap-3">
+            <div class="hidden shrink-0 items-center gap-3 md:flex">
                 @php $navClass = fn ($active) => 'whitespace-nowrap border-b-2 px-2 py-5 font-mono text-xs font-bold uppercase tracking-wider transition-colors '.($active ? 'border-cyber-neon text-cyber-neon' : 'border-transparent text-gray-400 hover:text-white'); @endphp
-                @auth<a href="{{ route('groups') }}" class="{{ $navClass(request()->routeIs('groups')) }}">Groups</a>@endauth
                 <a href="{{ route('download') }}" class="{{ $navClass(request()->routeIs('download')) }}">Download</a>
                 @auth
-                    @if (auth()->user()->is_admin)<a href="{{ route('admin') }}" class="{{ $navClass(request()->routeIs('admin')) }}">Admin</a>@endif
+                    <a href="{{ route('dashboard') }}" class="{{ $navClass(request()->routeIs('dashboard', 'groups', 'admin', 'admin.*')) }}">Dashboard</a>
                 @endauth
                 @guest
                     <a href="{{ route('login') }}" class="whitespace-nowrap border border-cyber-600 px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-gray-300 transition-all hover:border-cyber-neon hover:text-cyber-neon">Login</a>
                     <a href="{{ route('register') }}" class="whitespace-nowrap bg-cyber-neon px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-black transition-all hover:bg-emerald-400 neon-glow-green">Register</a>
-                @else
-                    <span class="hidden max-w-[10rem] truncate font-mono text-xs text-gray-400 sm:inline"><i class="fa-solid fa-user-secret mr-1.5 text-cyber-cyan"></i>{{ auth()->user()->name }}</span>
-                    <form method="POST" action="{{ route('logout') }}">
-                        @csrf
-                        <button type="submit" class="whitespace-nowrap border border-cyber-600 px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-red-400 transition-all hover:bg-red-500 hover:text-black">Logout</button>
-                    </form>
                 @endguest
             </div>
+
+            <button type="button" data-drawer-open aria-label="Open menu" aria-controls="drawer" aria-expanded="false"
+                    class="flex h-10 w-10 items-center justify-center border border-cyber-600 bg-cyber-800 text-gray-300 transition-all hover:border-cyber-neon hover:text-cyber-neon md:hidden">
+                <i class="fa-solid fa-bars"></i>
+            </button>
         </div>
     </header>
 
-    <main class="flex-grow @yield('container', 'max-w-5xl') mx-auto px-3 sm:px-6 lg:px-8 py-8 w-full">
-        @yield('content')
-    </main>
+    {{-- Mobile drawer. It sits outside the blurred header, so `fixed` is relative to the screen. --}}
+    <div id="drawer" class="pointer-events-none fixed inset-0 z-[60] md:hidden" aria-hidden="true">
+        <div data-drawer-close class="absolute inset-0 bg-black/70 opacity-0 backdrop-blur-sm transition-opacity duration-300"></div>
+        <div data-drawer-panel class="absolute right-0 top-0 flex h-full w-72 max-w-[85vw] translate-x-full flex-col border-l border-cyber-600 bg-cyber-900 shadow-2xl transition-transform duration-300">
+            <div class="flex h-16 shrink-0 items-center justify-between border-b border-cyber-600/60 px-4">
+                <span class="font-mono text-sm font-black text-white"><span class="mr-2 text-cyber-neon">&gt;_</span>{{ config('app.name') }}<span class="text-cyber-neon">.</span></span>
+                <button type="button" data-drawer-close aria-label="Close menu" class="h-9 w-9 text-gray-400 transition-all hover:bg-cyber-700 hover:text-cyber-neon"><i class="fa-solid fa-xmark text-base"></i></button>
+            </div>
+            <div class="flex-1 overflow-y-auto">
+                @php $drawerItem = 'flex items-center gap-2.5 border-l-2 px-4 py-3 font-mono text-xs font-bold transition-all '; @endphp
+                @auth
+                    @include('partials.dashboard-menu')
+                @else
+                    <nav class="py-3">
+                        <a href="{{ route('home') }}" class="{{ $drawerItem }} {{ request()->routeIs('home') ? 'border-cyber-neon bg-cyber-700/60 text-cyber-neon' : 'border-transparent text-gray-300 hover:border-cyber-neon hover:text-white' }}"><i class="fa-solid fa-house w-4 text-center"></i>Home</a>
+                        <a href="{{ route('download') }}" class="{{ $drawerItem }} {{ request()->routeIs('download') ? 'border-cyber-neon bg-cyber-700/60 text-cyber-neon' : 'border-transparent text-gray-300 hover:border-cyber-neon hover:text-white' }}"><i class="fa-solid fa-download w-4 text-center"></i>Download</a>
+                    </nav>
+                @endauth
+            </div>
+            @guest
+                <div class="shrink-0 space-y-2 border-t border-cyber-600/60 p-4">
+                    <a href="{{ route('login') }}" class="block border border-cyber-neon/50 px-4 py-2.5 text-center font-mono text-xs font-bold uppercase tracking-wider text-cyber-neon transition-all hover:bg-cyber-neon hover:text-black"><i class="fa-solid fa-right-to-bracket mr-1.5"></i>Login</a>
+                    <a href="{{ route('register') }}" class="block bg-cyber-neon px-4 py-2.5 text-center font-mono text-xs font-bold uppercase tracking-wider text-black transition-all hover:bg-emerald-400 neon-glow-green"><i class="fa-solid fa-user-plus mr-1.5"></i>Register</a>
+                </div>
+            @endguest
+        </div>
+    </div>
+
+    @auth
+        @if (request()->routeIs('groups', 'admin', 'admin.*'))
+            <div class="mx-auto flex w-full max-w-screen-2xl flex-grow">
+                <aside class="hidden w-60 shrink-0 border-r border-cyber-700 bg-cyber-800/40 md:block">
+                    <div class="sticky top-16">@include('partials.dashboard-menu')</div>
+                </aside>
+                <main class="min-w-0 flex-1 px-3 py-8 sm:px-6 lg:px-8">@yield('content')</main>
+            </div>
+        @else
+            <main class="flex-grow @yield('container', 'max-w-5xl') mx-auto px-3 sm:px-6 lg:px-8 py-8 w-full">@yield('content')</main>
+        @endif
+    @else
+        <main class="flex-grow @yield('container', 'max-w-5xl') mx-auto px-3 sm:px-6 lg:px-8 py-8 w-full">@yield('content')</main>
+    @endauth
 
     <footer class="border-t border-cyber-600/60 bg-cyber-900">
         <div class="mx-auto flex w-full max-w-screen-2xl flex-col items-center justify-between gap-2 px-4 py-6 font-mono text-[11px] text-gray-500 sm:flex-row sm:px-6 lg:px-8">

@@ -28,6 +28,7 @@ Route::middleware('guest')->group(function () {
 
 Route::middleware('auth')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
+    Route::redirect('/dashboard', '/groups')->name('dashboard');
     Route::get('/groups', [GroupController::class, 'index'])->name('groups');
     Route::post('/groups', [GroupController::class, 'store'])->name('groups.store');
     Route::post('/groups/{group}/invite', [GroupController::class, 'invite'])->middleware('throttle:20,1')->name('groups.invite');
@@ -36,6 +37,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/admin', [AdminController::class, 'index'])->middleware('admin')->name('admin');
     Route::middleware('admin')->prefix('admin')->group(function () {
         Route::get('/binaries', [AdminBinaryController::class, 'index'])->name('admin.binaries');
+        Route::get('/binaries/upload', [AdminBinaryController::class, 'create'])->name('admin.binaries.create');
         Route::post('/binaries', [AdminBinaryController::class, 'store'])->name('admin.binaries.store');
         Route::delete('/binaries/{binary}', [AdminBinaryController::class, 'destroy'])->whereNumber('binary')->name('admin.binaries.destroy');
     });
