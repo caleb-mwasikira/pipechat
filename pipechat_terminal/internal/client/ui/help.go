@@ -39,7 +39,7 @@ var helpSections = []helpSection{
 		{"/bio TEXT", "write your bio, up to 280 characters (/bio clear removes it)"},
 	}},
 	{"Files", []helpItem{
-		{"/upload PATH [-name SHORT]", "send a file or folder, encrypted, to this chat"},
+		{"/upload PATH [-name SHORT]", "send a file or folder, encrypted, to this chat; the folder is listed as you type, and you confirm before it goes"},
 		{"/download SHORT|LINK [DIR]", "save a shared file"},
 		{"/files", "list files shared with you"},
 		{"/link SHORT", "show a file's download link (it holds the key)"},
@@ -58,6 +58,10 @@ var helpSections = []helpSection{
 		{"/search TEXT", "find TEXT in every chat (also the groups you closed)"},
 		{"/search -here TEXT", "only in the chat you are in"},
 		{"/search -in CHAT TEXT", "only in one chat (quote a name with spaces)"},
+	}},
+	{"Your computer", []helpItem{
+		{"!COMMAND · /sh COMMAND", "run a shell command here and see what it prints (e.g. !ls -l); nothing is sent to the chat"},
+		{"!cd FOLDER", "change folder, so /upload and /download paths can be short"},
 	}},
 	{"Screen", []helpItem{
 		{"/clear", "clear this chat's messages from view"},

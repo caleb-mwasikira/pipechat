@@ -494,6 +494,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case profileResult:
 		return m, m.showProfile(message)
 
+	case shellDone:
+		return m, m.shellFinished(message)
+
 	case bioSaved:
 		current := m.groups[m.current]
 		switch {
@@ -1272,6 +1275,9 @@ func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
+		if command, ok := shellCommand(text); ok {
+			return m, m.runShell(m.groups[m.current], command)
+		}
 		if strings.HasPrefix(text, "/") {
 			return m, m.runCommand(text)
 		}
@@ -1697,6 +1703,7 @@ func (m *Model) View() string {
 	}
 	chat := lipgloss.JoinVertical(lipgloss.Left, ui.Active.Render(title), m.viewport.View())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " "+strings.ReplaceAll(chat, "\n", "\n "))
+	body = m.withBrowsePanel(body)
 	if m.progress != nil {
 		return header + "\n" + body + "\n" + ui.TransferLine(*m.progress, m.width, time.Now()) + "\n" + m.input.View()
 	}

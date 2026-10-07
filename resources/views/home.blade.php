@@ -24,20 +24,17 @@
     </div>
 </section>
 
-{{-- What it does: three things, each with a small picture. --}}
+{{-- What it does: two things, each with a small picture. --}}
 <section id="features" class="py-10 sm:py-16" aria-labelledby="features-title">
     <p class="font-mono text-xs uppercase tracking-[0.2em] text-cyber-neon">// features</p>
     <h2 id="features-title" class="mb-12 font-mono text-3xl font-black text-white sm:text-4xl">Everything stays in your terminal</h2>
 
     @php
         $features = [
-            ['n' => '01', 'icon' => 'fa-terminal', 'title' => 'Chat from your terminal', 'illustration' => 'chat',
-             'text' => 'Groups and private chats in a fast, keyboard-driven client for Linux and Windows. Messages are end-to-end encrypted, so only the people in a chat can read them, and what you missed while away is waiting when you log in.',
-             'points' => ['Public and private groups, invites and invite links', 'Search every chat, copy text, scroll with the wheel', 'Updates itself when a new version is out']],
-            ['n' => '02', 'icon' => 'fa-music', 'title' => 'Listen to group music from the terminal', 'illustration' => 'music',
+            ['n' => '01', 'icon' => 'fa-music', 'title' => 'Listen to group music from the terminal', 'illustration' => 'music',
              'text' => 'Everyone uploads songs to one shared library on the website. In the terminal, type /play and the whole library streams, on shuffle or repeat. Songs you have heard once are kept on your computer, so they play again instantly.',
              'points' => ['/play, /shuffle, /repeat, /next and /stop', 'Name a song by its number, name or hash', '/save keeps any song as a file']],
-            ['n' => '03', 'icon' => 'fa-file-arrow-up', 'title' => 'Upload, share and download files straight from your terminal', 'illustration' => 'files',
+            ['n' => '02', 'icon' => 'fa-file-arrow-up', 'title' => 'Upload, share and download files straight from your terminal', 'illustration' => 'files',
              'text' => 'Send a file or a whole folder to a chat with /upload. It is packed and encrypted on your computer before it leaves, with a preview first and a progress bar while it goes. The other side checks its MD5 when it arrives.',
              'points' => ['Tab completes file names as you type', 'Every file has an MD5 hash you can compare', '/download by name, number or the start of the hash']],
         ];
