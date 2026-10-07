@@ -1,0 +1,42 @@
+<?php
+
+use App\Http\Controllers\AdminBinaryController;
+use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\DownloadController;
+use App\Http\Controllers\GroupController;
+use App\Http\Controllers\PasswordResetController;
+use Illuminate\Support\Facades\Route;
+
+Route::view('/', 'home')->name('home');
+Route::get('/download', [DownloadController::class, 'index'])->name('download');
+Route::get('/download/{binary}', [DownloadController::class, 'show'])->whereNumber('binary')->name('download.file');
+
+Route::middleware('guest')->group(function () {
+    Route::view('/register', 'auth.register')->name('register');
+    Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:10,1');
+    Route::view('/login', 'auth.login')->name('login');
+    Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:10,1');
+
+    Route::view('/forgot-password', 'auth.forgot-password')->name('password.request');
+    Route::post('/forgot-password', [PasswordResetController::class, 'sendLink'])
+        ->middleware('throttle:5,1')->name('password.email');
+    Route::get('/reset-password/{token}', fn (string $token) => view('auth.reset-password', ['token' => $token]))
+        ->name('password.reset');
+    Route::post('/reset-password', [PasswordResetController::class, 'reset'])->name('password.update');
+});
+
+Route::middleware('auth')->group(function () {
+    Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
+    Route::get('/groups', [GroupController::class, 'index'])->name('groups');
+    Route::post('/groups', [GroupController::class, 'store'])->name('groups.store');
+    Route::post('/groups/{group}/invite', [GroupController::class, 'invite'])->middleware('throttle:20,1')->name('groups.invite');
+    Route::post('/groups/{group}/leave', [GroupController::class, 'leave'])->name('groups.leave');
+    Route::post('/invites/{invite}/{answer}', [GroupController::class, 'respond'])->name('invites.respond');
+    Route::get('/admin', [AdminController::class, 'index'])->middleware('admin')->name('admin');
+    Route::middleware('admin')->prefix('admin')->group(function () {
+        Route::get('/binaries', [AdminBinaryController::class, 'index'])->name('admin.binaries');
+        Route::post('/binaries', [AdminBinaryController::class, 'store'])->name('admin.binaries.store');
+        Route::delete('/binaries/{binary}', [AdminBinaryController::class, 'destroy'])->whereNumber('binary')->name('admin.binaries.destroy');
+    });
+});

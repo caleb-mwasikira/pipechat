@@ -1,0 +1,179 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+
+@theme {
+    --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+
+    --color-cyber-900: #030712;
+    --color-cyber-800: #0b0f19;
+    --color-cyber-700: #111827;
+    --color-cyber-600: #1f2937;
+    --color-cyber-500: #374151;
+    --color-cyber-neon: #00ff66;
+    --color-cyber-cyan: #00f0ff;
+    --color-cyber-purple: #a855f7;
+    --color-cyber-danger: #ef4444;
+}
+
+body {
+    font-family: 'JetBrains Mono', monospace;
+    background-color: var(--color-cyber-900);
+    color: #e5e7eb;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--color-cyber-800);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--color-cyber-600);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--color-cyber-neon);
+}
+
+.scanlines {
+    background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+    background-size: 100% 4px, 6px 100%;
+    pointer-events: none;
+}
+
+.neon-glow-green {
+    box-shadow: 0 0 15px rgba(0, 255, 102, 0.25);
+}
+
+.neon-glow-cyan {
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
+}
+
+.text-glow-green {
+    text-shadow: 0 0 8px rgba(0, 255, 102, 0.6);
+}
+
+.text-glow-cyan {
+    text-shadow: 0 0 8px rgba(0, 240, 255, 0.6);
+}
+
+[x-cloak] {
+    display: none !important;
+}
+
+/* ---- Terminal landing kit — used by the public landing pages. Everything
+   reads the cyber-* tokens, so light mode inherits with no overrides. ---- */
+
+.term-grid {
+    background-image:
+        linear-gradient(to right, color-mix(in srgb, var(--color-cyber-500) 30%, transparent) 1px, transparent 1px),
+        linear-gradient(to bottom, color-mix(in srgb, var(--color-cyber-500) 30%, transparent) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 25%, transparent 78%);
+}
+
+@keyframes term-blink {
+    to {
+        visibility: hidden;
+    }
+}
+
+.caret::after {
+    content: '\2588';
+    margin-left: 0.12em;
+    color: var(--color-cyber-neon);
+    animation: term-blink 1s steps(1, start) infinite;
+}
+
+@keyframes term-type {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.term-line {
+    opacity: 0;
+    animation: term-type 0.35s ease-out forwards;
+    animation-delay: var(--d, 0s);
+}
+
+@keyframes ticker-scroll {
+    to {
+        transform: translateX(-50%);
+    }
+}
+
+.ticker-track {
+    animation: ticker-scroll 45s linear infinite;
+}
+
+.ticker:hover .ticker-track {
+    animation-play-state: paused;
+}
+
+.wordmark-outline {
+    color: transparent;
+    -webkit-text-stroke: 1px var(--color-cyber-600);
+}
+
+/* L-shaped corner marks, like a targeting reticle. */
+.corners {
+    position: relative;
+}
+
+.corners::before,
+.corners::after {
+    content: '';
+    position: absolute;
+    width: 0.75rem;
+    height: 0.75rem;
+    pointer-events: none;
+    border-color: var(--color-cyber-neon);
+    transition: all 0.2s;
+}
+
+.corners::before {
+    top: -1px;
+    left: -1px;
+    border-top: 2px solid;
+    border-left: 2px solid;
+}
+
+.corners::after {
+    right: -1px;
+    bottom: -1px;
+    border-right: 2px solid;
+    border-bottom: 2px solid;
+}
+
+.corners:hover::before,
+.corners:hover::after {
+    width: 1.25rem;
+    height: 1.25rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .caret::after,
+    .ticker-track {
+        animation: none;
+    }
+
+    .term-line {
+        opacity: 1;
+        animation: none;
+    }
+}
+
+
