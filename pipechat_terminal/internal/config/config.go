@@ -22,8 +22,10 @@ type Config struct {
 	// EscrowKey (CHAT_ESCROW_KEY, 64 hex characters) lets the server hold website groups' keys so
 	// invitees get in at once. Empty turns that off: keys then pass from member to member.
 	EscrowKey []byte
-	TLSCert   string
-	TLSKey    string
+	// StorageDir is the website's storage/app/private folder, where uploaded music lives.
+	StorageDir string
+	TLSCert    string
+	TLSKey     string
 
 	// Encrypted files shared in chats are kept in FilesDir until they are FileDays old.
 	FilesDir       string
@@ -64,6 +66,7 @@ func Load() (*Config, error) {
 		Host:           get("CHAT_HOST", ""),
 		Port:           get("CHAT_PORT", "7777"),
 		DatabaseURL:    databaseURL(),
+		StorageDir:     get("CHAT_STORAGE_DIR", "../storage/app/private"),
 		TLSCert:        get("CHAT_TLS_CERT", ""),
 		TLSKey:         get("CHAT_TLS_KEY", ""),
 		SMTPHost:       get("SMTP_HOST", ""),

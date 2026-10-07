@@ -10,7 +10,9 @@
     </div>
 
     <p class="{{ $label }} text-gray-500">Account</p>
-    <a href="{{ route('groups') }}" class="{{ $item(request()->routeIs('groups')) }}"><i class="fa-solid fa-users w-4 text-center"></i>Groups</a>
+    <a href="{{ route('groups') }}" class="{{ $item(request()->routeIs('groups', 'groups.*')) }}"><i class="fa-solid fa-users w-4 text-center"></i>Groups</a>
+    <a href="{{ route('profile') }}" class="{{ $item(request()->routeIs('profile')) }}"><i class="fa-solid fa-id-card w-4 text-center"></i>Profile</a>
+    <a href="{{ route('music') }}" class="{{ $item(request()->routeIs('music')) }}"><i class="fa-solid fa-music w-4 text-center"></i>Music</a>
     <a href="{{ route('download') }}" class="{{ $item(false) }}"><i class="fa-solid fa-download w-4 text-center"></i>Download</a>
 
     @if ($user->is_admin)

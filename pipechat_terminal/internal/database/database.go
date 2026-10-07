@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS messages (
 	ct       BYTEA NOT NULL,
 	PRIMARY KEY (group_id, seq)
 );
+CREATE TABLE IF NOT EXISTS presence (
+	handle    TEXT PRIMARY KEY,
+	online    BOOLEAN NOT NULL,
+	last_seen BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS open_groups (
+	name_key   TEXT PRIMARY KEY,
+	name       TEXT NOT NULL,
+	gid        TEXT NOT NULL UNIQUE,
+	code       TEXT NOT NULL,
+	creator    TEXT NOT NULL,
+	created_at BIGINT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS counters (
 	name  TEXT PRIMARY KEY,
 	value BIGINT NOT NULL DEFAULT 0

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"regexp"
+	"sort"
 
 	"github.com/go-chi/chi/v5"
 
@@ -180,4 +181,27 @@ func sendMessage(w http.ResponseWriter, r *http.Request) {
 		deliver(member, toEvent(groupID, message))
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/groups/{gid}/online: who has this chat open right now. Only people in the group may ask.
+func groupOnline(w http.ResponseWriter, r *http.Request) {
+	groupID := chi.URLParam(r, "gid")
+	own := currentSession(r)
+
+	live.mutex.Lock()
+	defer live.mutex.Unlock()
+	if !own.joined[groupID] {
+		writeError(w, http.StatusForbidden, "not in this group")
+		return
+	}
+	seen := map[string]bool{}
+	handles := []string{}
+	for member := range live.members[groupID] {
+		if member.socket && !seen[member.handle] {
+			seen[member.handle] = true
+			handles = append(handles, member.handle)
+		}
+	}
+	sort.Strings(handles)
+	writeJSON(w, http.StatusOK, handles)
 }

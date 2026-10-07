@@ -60,10 +60,12 @@ func testDatabase(t *testing.T) string {
 
 // The website's tables, as its Laravel migrations make them (only the columns the server uses).
 const websiteSchema = `
-CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
+CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL DEFAULT '', handle TEXT UNIQUE, bio TEXT, created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL);
 CREATE TABLE chat_groups (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, owner_id BIGINT NOT NULL REFERENCES users(id), gid TEXT UNIQUE, escrow BYTEA);
 CREATE TABLE chat_group_members (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), delivered BOOLEAN NOT NULL DEFAULT false, UNIQUE (group_id, user_id));
 CREATE TABLE chat_group_invites (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), inviter_id BIGINT NOT NULL REFERENCES users(id), invitee_id BIGINT NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending');
+CREATE TABLE tracks (id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, artist TEXT, path TEXT NOT NULL, extension TEXT NOT NULL, size BIGINT NOT NULL, uploaded_by BIGINT REFERENCES users(id));
+CREATE TABLE chat_group_files (id BIGSERIAL PRIMARY KEY, group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT REFERENCES users(id), name TEXT NOT NULL, size BIGINT NOT NULL, expires_at TIMESTAMP, created_at TIMESTAMP);
 CREATE TABLE chat_group_grants (group_id BIGINT NOT NULL REFERENCES chat_groups(id), user_id BIGINT NOT NULL REFERENCES users(id), from_user_id BIGINT NOT NULL REFERENCES users(id), sealed BYTEA NOT NULL, created_at TIMESTAMP, PRIMARY KEY (group_id, user_id));`
 
 // useServer starts the routes on a fresh database schema and returns the server's address.
@@ -650,4 +652,219 @@ func TestCreatorCanRemoveAMember(t *testing.T) {
 	if status := call(t, "POST", base+"/api/groups/"+gid+"/messages", alice, sendRequest{CT: []byte("hi")}, nil); status != http.StatusNoContent {
 		t.Fatalf("the creator can still send: %d", status)
 	}
+}
+
+func TestMusicLibrary(t *testing.T) {
+	base := useServer(t)
+	Config.StorageDir = t.TempDir()
+	token := registerUser(t, base, "djay")
+	os.MkdirAll(filepath.Join(Config.StorageDir, "music"), 0o755)
+	os.WriteFile(filepath.Join(Config.StorageDir, "music", "a.mp3"), []byte("0123456789"), 0o644)
+	os.WriteFile(filepath.Join(Config.StorageDir, "secret.txt"), []byte("do not serve"), 0o644)
+	var userID int64
+	Pool.QueryRow(`SELECT id FROM users WHERE handle = 'djay'`).Scan(&userID)
+	Pool.Exec(`INSERT INTO tracks (title, artist, path, extension, size, uploaded_by) VALUES ('One', NULL, 'music/a.mp3', 'mp3', 10, $1)`, userID)
+	Pool.Exec(`INSERT INTO tracks (title, path, extension, size) VALUES ('Sneaky', '../../etc/passwd', 'mp3', 1)`)
+	Pool.Exec(`INSERT INTO tracks (title, path, extension, size) VALUES ('Gone', 'music/missing.mp3', 'mp3', 1)`)
+
+	if status := call(t, "GET", base+"/api/music", "", nil, nil); status != http.StatusUnauthorized {
+		t.Fatalf("list without a login: %d", status)
+	}
+	if status := call(t, "GET", base+"/api/music/1/file", "", nil, nil); status != http.StatusUnauthorized {
+		t.Fatalf("file without a login: %d", status)
+	}
+	var tracks []database.Track
+	if status := call(t, "GET", base+"/api/music", token, nil, &tracks); status != 200 || len(tracks) != 3 || tracks[2].Title != "One" || tracks[2].Uploader != "djay" {
+		t.Fatalf("list: %d %+v", status, tracks)
+	}
+
+	get := func(path string, rangeHeader string) (int, string, string) {
+		request, _ := http.NewRequest("GET", base+path, nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		if rangeHeader != "" {
+			request.Header.Set("Range", rangeHeader)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(body), response.Header.Get("Content-Type")
+	}
+	if status, body, kind := get("/api/music/1/file", ""); status != 200 || body != "0123456789" || kind != "audio/mpeg" {
+		t.Fatalf("file: %d %q %q", status, body, kind)
+	}
+	if status, body, _ := get("/api/music/1/file", "bytes=2-4"); status != http.StatusPartialContent || body != "234" {
+		t.Fatalf("range: %d %q", status, body)
+	}
+	if status, _, _ := get("/api/music/2/file", ""); status != http.StatusNotFound {
+		t.Fatalf("a path outside the music folder: %d", status)
+	}
+	if status, _, _ := get("/api/music/3/file", ""); status != http.StatusNotFound {
+		t.Fatalf("a missing file: %d", status)
+	}
+	if status, _, _ := get("/api/music/99/file", ""); status != http.StatusNotFound {
+		t.Fatalf("no such track: %d", status)
+	}
+	if status, _, _ := get("/api/music/abc/file", ""); status != http.StatusBadRequest {
+		t.Fatalf("bad id: %d", status)
+	}
+}
+
+func TestBioShowsInWhois(t *testing.T) {
+	base := useServer(t)
+	alice := registerUser(t, base, "alice")
+	bob := registerUser(t, base, "bob")
+
+	var profile userResponse
+	if status := call(t, "GET", base+"/api/users/alice", bob, nil, &profile); status != 200 || profile.Bio != "" || profile.PubKey == "" || profile.Joined == 0 {
+		t.Fatalf("profile: %d %+v", status, profile)
+	}
+	if profile.Online {
+		t.Fatal("alice has no connection open, so she is not online")
+	}
+
+	if status := call(t, "PUT", base+"/api/profile", alice, bioRequest{Bio: "  Hello\n\tthere\x07 friend  "}, nil); status != http.StatusNoContent {
+		t.Fatalf("save bio: %d", status)
+	}
+	listen(t, base, alice)
+	for range 50 { // the server notes the open socket a moment after the client sees it connect
+		call(t, "GET", base+"/api/users/alice", bob, nil, &profile)
+		if profile.Online {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if profile.Bio != "Hello there friend" || !profile.Online {
+		t.Fatalf("bio %q, online %v", profile.Bio, profile.Online)
+	}
+
+	if status := call(t, "PUT", base+"/api/profile", alice, bioRequest{Bio: strings.Repeat("x", 281)}, nil); status != http.StatusBadRequest {
+		t.Fatalf("too long: %d", status)
+	}
+	if status := call(t, "PUT", base+"/api/profile", alice, bioRequest{Bio: ""}, nil); status != http.StatusNoContent {
+		t.Fatalf("clear bio: %d", status)
+	}
+	profile = userResponse{} // a field the server leaves out would keep its old value
+	call(t, "GET", base+"/api/users/alice", bob, nil, &profile)
+	if profile.Bio != "" {
+		t.Fatalf("bio should be cleared: %q", profile.Bio)
+	}
+	if status := call(t, "PUT", base+"/api/profile", "", bioRequest{Bio: "x"}, nil); status != http.StatusUnauthorized {
+		t.Fatalf("without a login: %d", status)
+	}
+}
+
+func TestWhoIsOnlineInAChat(t *testing.T) {
+	base := useServer(t)
+	alice := registerUser(t, base, "alice")
+	bob := registerUser(t, base, "bob")
+	carol := registerUser(t, base, "carol")
+	const gid = "00000000000000cc"
+	token := strings.Repeat("ab", 32)
+	call(t, "POST", base+"/api/groups", alice, createGroupRequest{GID: gid, Tok: token}, nil)
+	for _, member := range []string{alice, bob, carol} {
+		call(t, "POST", base+"/api/groups/"+gid+"/join", member, joinRequest{Tok: token}, nil)
+	}
+
+	online := func(asking string) (int, []string) {
+		var handles []string
+		status := call(t, "GET", base+"/api/groups/"+gid+"/online", asking, nil, &handles)
+		return status, handles
+	}
+	if status, handles := online(alice); status != 200 || len(handles) != 0 {
+		t.Fatalf("nobody has a socket open yet: %d %v", status, handles)
+	}
+
+	listen(t, base, alice)
+	listen(t, base, bob) // carol joined but has no socket: her terminal is closed
+	var handles []string
+	for range 50 {
+		_, handles = online(alice)
+		if len(handles) == 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(handles) != 2 || handles[0] != "alice" || handles[1] != "bob" {
+		t.Fatalf("online: %v", handles)
+	}
+
+	outsider := registerUser(t, base, "dave")
+	if status, _ := online(outsider); status != http.StatusForbidden {
+		t.Fatalf("someone not in the chat must not see who is: %d", status)
+	}
+}
+
+func TestSharesAndPresenceAreRecordedForTheWebsite(t *testing.T) {
+	base := useServer(t)
+	Config.FileDays = 7
+	alice := registerUser(t, base, "alice")
+	bob := registerUser(t, base, "bob")
+	var aliceID, group int64
+	Pool.QueryRow(`SELECT id FROM users WHERE handle = 'alice'`).Scan(&aliceID)
+	const gid = "00000000000000dd"
+	Pool.QueryRow(`INSERT INTO chat_groups (name, owner_id, gid) VALUES ('crew', $1, $2) RETURNING id`, aliceID, gid).Scan(&group)
+	Pool.Exec(`INSERT INTO chat_group_members (group_id, user_id, delivered) VALUES ($1, $2, true)`, group, aliceID)
+
+	share := func(token string, id string) int {
+		return call(t, "POST", base+"/api/sync/shares", token, shareRequest{GID: id, Name: "holiday.zip", Size: 1234}, nil)
+	}
+	if status := share(alice, gid); status != http.StatusNoContent {
+		t.Fatalf("share: %d", status)
+	}
+	if status := share(bob, gid); status != http.StatusNotFound {
+		t.Fatalf("a non-member's share must not be listed: %d", status)
+	}
+	if status := share(alice, "00000000000000ee"); status != http.StatusNotFound {
+		t.Fatalf("not a website group: %d", status)
+	}
+	var count int
+	var days float64
+	Pool.QueryRow(`SELECT COUNT(*), COALESCE(MAX(EXTRACT(EPOCH FROM (expires_at - created_at)) / 86400), 0) FROM chat_group_files WHERE group_id = $1 AND name = 'holiday.zip' AND size = 1234`, group).Scan(&count, &days)
+	if count != 1 || days < 6.9 || days > 7.1 {
+		t.Fatalf("recorded %d, expires in %.1f days", count, days)
+	}
+
+	// Presence follows the open socket, for the website to read.
+	present := func() (bool, int64) {
+		var online bool
+		var seen int64
+		Pool.QueryRow(`SELECT online, last_seen FROM presence WHERE handle = 'alice'`).Scan(&online, &seen)
+		return online, seen
+	}
+	if online, _ := present(); online {
+		t.Fatal("not online before any socket")
+	}
+	connection := listenAndKeep(t, base, alice)
+	for range 50 {
+		if online, _ := present(); online {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if online, seen := present(); !online || time.Now().Unix()-seen > 5 {
+		t.Fatalf("online %v, last seen %d", online, seen)
+	}
+	connection.Close(websocket.StatusNormalClosure, "bye")
+	for range 100 {
+		if online, _ := present(); !online {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("closing the socket should mark the person offline")
+}
+
+// listenAndKeep opens the WebSocket and hands back the connection so a test can close it.
+func listenAndKeep(t *testing.T, base string, token string) *websocket.Conn {
+	t.Helper()
+	header := http.Header{"Authorization": {"Bearer " + token}}
+	connection, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(base, "http")+"/api/ws", &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("websocket: %v", err)
+	}
+	t.Cleanup(func() { connection.CloseNow() })
+	return connection
 }

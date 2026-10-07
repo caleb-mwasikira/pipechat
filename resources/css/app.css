@@ -178,3 +178,11 @@ body {
 }
 
 
+
+/* Pop-up boxes sit in the middle of the screen. */
+@layer base {
+    dialog {
+        margin: auto;
+        max-width: calc(100vw - 2rem);
+    }
+}

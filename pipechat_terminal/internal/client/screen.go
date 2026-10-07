@@ -10,31 +10,23 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"pipechat/internal/client/music"
+	"pipechat/internal/client/ui"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"pipechat/internal/client/files"
 	"pipechat/internal/crypto"
 )
 
-const sidebarWidth = 24
-
-var (
-	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62")).Padding(0, 1)
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	selfStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true)
-	otherStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Bold(true)
-	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
-	sidebarStyle  = lipgloss.NewStyle().Width(sidebarWidth).BorderRight(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240"))
-	authBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(1, 3)
-	maxMessageLen = 2000
-)
+const maxMessageLen = 2000
 
 // A line shown in a group's message list.
 type entry struct {
@@ -57,16 +49,18 @@ type groupState struct {
 	notify    bool            // direct: tell the peer once the server agrees
 	seen      map[uint64]bool // sequence numbers already shown
 	webID     int64           // the website group this came from, 0 if none
+	openName  string          // set on a group just made public: list it under this name once created
 	webGrant  bool            // true when the key came from another member (confirm it), false when we created it
 }
 
 // What the account's sealed vault holds. The server cannot read any of it.
 type vaultData struct {
-	PrivateKey string                `json:"private_key"` // hex X25519 identity key
-	Groups     []string              `json:"groups"`      // invite codes
-	Direct     []string              `json:"direct"`      // handles of direct chats
-	Pins       map[string]string     `json:"pins"`        // handle -> public key first seen for it
-	Files      map[string]fileRecord `json:"files"`       // short name -> shared file
+	PrivateKey string                `json:"private_key"`      // hex X25519 identity key
+	Groups     []string              `json:"groups"`           // invite codes
+	Direct     []string              `json:"direct"`           // handles of direct chats
+	Pins       map[string]string     `json:"pins"`             // handle -> public key first seen for it
+	Files      map[string]fileRecord `json:"files"`            // short name -> shared file
+	Closed     []closedChat          `json:"closed,omitempty"` // chats taken out of the sidebar with /close
 }
 
 // What goes inside a sealed message.
@@ -123,6 +117,16 @@ type requestFailed struct {
 	err   error
 }
 
+type profileResult struct {
+	profile Profile
+	err     error
+}
+
+type bioSaved struct {
+	bio string
+	err error
+}
+
 type kickResult struct {
 	group  *groupState
 	handle string
@@ -163,7 +167,18 @@ type Model struct {
 	relogging     bool
 	pendingNotice string
 	syncing       bool
-	showHelp      bool // the full-screen help guide is open
+	peersOnline   map[string][]string // chat id -> handles with it open, as last asked
+	playing       *nowPlaying         // the song being played, if any
+	loadingMusic  bool                // a track is being fetched
+	list          music.Playlist      // what plays now and next, with shuffle and repeat
+	proxy         *music.Proxy        // lets a player stream a song without the login token
+	showHelp      bool                // a full-screen page (help, /whois) is open
+	pageTitle     string
+	progress      *files.Progress // how far the upload or download has got
+	pathMode      bool            // the input holds /upload or /download, whose suggestions are file names
+	pageFooter    string          // what the bottom line of a page says; empty for the usual
+	pendingSend   *pendingUpload  // an upload waiting for a yes on its preview page
+	pageContent   func(width int) string
 	helpView      viewport.Model
 	syncBusy      map[string]time.Time // website group work already under way, and since when
 	uploadTarget  *groupState
@@ -201,6 +216,12 @@ func NewModel(store *Store, address string) *Model {
 		groups:        []*groupState{{}},
 	}
 	m.connectInput.Focus()
+	m.input.ShowSuggestions = true
+	m.input.CompletionStyle = ui.Dim
+	m.input.KeyMap.AcceptSuggestion = key.NewBinding(key.WithKeys("tab", "right"))
+	m.input.KeyMap.NextSuggestion = key.NewBinding(key.WithKeys("down"))
+	m.input.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("up"))
+	m.refreshSuggestions()
 	m.showLogin()
 
 	if address == "" {
@@ -265,12 +286,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = message.Width, message.Height
-		m.viewport.Width = max(10, m.width-sidebarWidth-2)
-		m.viewport.Height = max(3, m.height-4)
+		m.viewport.Width = max(10, m.width-ui.SidebarWidth-2)
+		m.layout()
 		m.input.Width = max(10, m.width-4)
 		m.helpView.Width, m.helpView.Height = m.width, max(3, m.height-3)
 		if m.showHelp {
-			m.helpView.SetContent(helpGuide(m.width))
+			m.helpView.SetContent(m.pageContent(m.width))
 		}
 		m.refresh()
 		return m, nil
@@ -312,7 +333,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncTick:
 		m.syncAsync()
+		m.fetchOnline()
 		return m, syncTicks()
+
+	case onlineResult:
+		if message.err == nil {
+			if m.peersOnline == nil {
+				m.peersOnline = map[string][]string{}
+			}
+			m.peersOnline[message.groupID] = message.handles
+		}
+		return m, nil
 
 	case syncResult:
 		m.handleSync(message)
@@ -338,21 +369,77 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice(target, message.what+": "+message.err.Error())
 		return m, nil
 
-	case TransferProgress:
-		m.transfer = message.Text
+	case files.Progress:
+		if m.busy { // a late tick after the transfer ended must not bring the bar back
+			m.progress = &message
+			m.transfer = message.Verb + " " + message.Name
+			m.layout()
+		}
 		return m, nil
 
-	case UploadDone:
+	case files.Done:
 		m.finishUpload(message)
 		return m, nil
 
-	case DownloadDone:
-		m.busy, m.transfer = false, ""
+	case files.Downloaded:
+		m.busy, m.transfer, m.progress = false, "", nil
+		m.layout()
 		current := m.groups[m.current]
 		if message.Err != nil {
 			m.notice(current, "download failed: "+message.Err.Error())
 		} else {
-			m.notice(current, fmt.Sprintf("downloaded %s (%s) to %s: %s", message.Name, formatSize(message.Bytes), message.Dir, strings.Join(message.Entries, ", ")))
+			m.notice(current, fmt.Sprintf("downloaded %s (%s) to %s: %s", message.Name, files.FormatSize(message.Bytes), message.Dir, strings.Join(message.Entries, ", ")))
+		}
+		return m, nil
+
+	case musicList:
+		m.showMusic(message)
+		return m, nil
+
+	case musicStart:
+		m.beginQueue(message)
+		return m, nil
+
+	case musicReady:
+		m.startTrack(message)
+		return m, nil
+
+	case musicEnded:
+		m.songEnded(message)
+		return m, nil
+
+	case openChecked:
+		m.startOpenGroup(message)
+		return m, nil
+
+	case openFound:
+		m.openFound(message)
+		return m, nil
+
+	case openListed:
+		m.showOpenGroups(message)
+		return m, nil
+
+	case openUnlisted:
+		if message.err != nil {
+			m.notice(m.groups[m.current], "could not make "+message.name+" private: "+message.err.Error())
+		} else {
+			m.notice(m.groups[m.current], message.name+" is no longer listed. People already in it stay in; nobody new can join by name.")
+		}
+		return m, nil
+
+	case profileResult:
+		return m, m.showProfile(message)
+
+	case bioSaved:
+		current := m.groups[m.current]
+		switch {
+		case message.err != nil:
+			m.notice(current, "could not save your bio: "+message.err.Error())
+		case message.bio == "":
+			m.notice(current, "your bio is cleared")
+		default:
+			m.notice(current, "your bio is saved; people see it with /whois @"+m.session.handle)
 		}
 		return m, nil
 
@@ -378,6 +465,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if message.String() == "ctrl+c" {
+			m.stopMusic()
 			return m, tea.Quit
 		}
 		switch {
@@ -463,19 +551,19 @@ func (m *Model) loginAsync(auth *pendingAuth, reconnect bool) {
 func (m *Model) authView() string {
 	title := "Log in to Pipechat"
 	hint := "Enter to log in · Ctrl+S to change server · Ctrl+C to quit\nNo account yet? Register on the website."
-	lines := []string{titleStyle.Render(title), "", "Email", m.emailInput.View(), "", "Password", m.passwordInput.View(), ""}
+	lines := []string{ui.Title.Render(title), "", "Email", m.emailInput.View(), "", "Password", m.passwordInput.View(), ""}
 	switch {
 	case m.pending != nil:
-		lines = append(lines, dimStyle.Render("working..."))
+		lines = append(lines, ui.Dim.Render("working..."))
 	case m.authError != "":
-		lines = append(lines, errorStyle.Render(m.authError))
+		lines = append(lines, ui.Error.Render(m.authError))
 	case !m.online:
-		lines = append(lines, dimStyle.Render("connecting to "+m.server.URL()+"..."))
+		lines = append(lines, ui.Dim.Render("connecting to "+m.server.URL()+"..."))
 	default:
-		lines = append(lines, dimStyle.Render("connected to "+m.server.URL()))
+		lines = append(lines, ui.Dim.Render("connected to "+m.server.URL()))
 	}
-	lines = append(lines, dimStyle.Render(hint))
-	box := authBoxStyle.Render(strings.Join(lines, "\n"))
+	lines = append(lines, ui.Dim.Render(hint))
+	box := ui.AuthBox.Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(max(m.width, 1), max(m.height, 1), lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -522,7 +610,7 @@ func (m *Model) handleAuth(result authResult) {
 	m.store.LastEmail = m.session.email
 	m.store.Save()
 	m.input.Focus()
-	for _, line := range welcomeLines(m.session.handle, crypto.Fingerprint(hex.EncodeToString(m.identity.PublicKey().Bytes()))) {
+	for _, line := range ui.WelcomeLines(m.session.handle, crypto.Fingerprint(hex.EncodeToString(m.identity.PublicKey().Bytes()))) {
 		m.groups[0].entries = append(m.groups[0].entries, entry{text: line, raw: true})
 	}
 	if m.pendingNotice != "" {
@@ -653,6 +741,15 @@ func (m *Model) finishAdding(g *groupState) {
 		}
 	}
 	m.saveVault()
+	if g.openName != "" {
+		name, code, server := g.openName, g.secret.Code(), m.server
+		g.openName = ""
+		m.server.enqueue(func() {
+			if err := server.ListOpenGroup(name, code); err != nil {
+				server.report(requestFailed{what: "could not make " + name + " public (it stays private)", err: err})
+			}
+		})
+	}
 	if g.webID != 0 {
 		id, groupID, granted := g.webID, g.secret.GIDHex(), g.webGrant
 		m.server.enqueue(func() {
@@ -774,6 +871,7 @@ func (m *Model) startDirect(peer string, notify bool) {
 	if _, waiting := m.pendingDirect[peer]; waiting {
 		return
 	}
+	m.forgetClosed(func(c closedChat) bool { return c.Peer == peer })
 	m.pendingDirect[peer] = notify
 	m.server.enqueue(func() {
 		publicKey, err := m.server.LookupUser(peer)
@@ -833,6 +931,55 @@ func (m *Model) findGroup(id string) *groupState {
 }
 
 // droppedFromGroup forgets a group the creator removed us from.
+// openPage takes over the whole screen with some text, until the person presses Esc.
+func (m *Model) openPage(title string, content func(width int) string) tea.Cmd {
+	if m.pendingSend == nil {
+		m.pageFooter = ""
+	}
+	m.showHelp, m.pageTitle, m.pageContent = true, title, content
+	m.helpView.Width, m.helpView.Height = m.width, max(3, m.height-3)
+	m.helpView.SetContent(content(m.width))
+	m.helpView.GotoTop()
+	return tea.ClearScreen
+}
+
+// lookupProfile asks the server about a user; the answer opens their page.
+func (m *Model) lookupProfile(handle string) {
+	server := m.server
+	go func() {
+		profile, err := server.LookupProfile(handle)
+		if err != nil {
+			profile.Handle = handle
+		}
+		server.report(profileResult{profile: profile, err: err})
+	}()
+}
+
+// showProfile opens the page for a /whois answer.
+func (m *Model) showProfile(result profileResult) tea.Cmd {
+	if result.err != nil {
+		m.notice(m.groups[m.current], "no user @"+result.profile.Handle+" ("+result.err.Error()+")")
+		return nil
+	}
+	p := result.profile
+	own := p.Handle == m.session.handle
+	keyCheck := ""
+	if !own {
+		switch pinned, known := m.vault.Pins[p.Handle]; {
+		case known && pinned != p.PubKey:
+			keyCheck = "WARNING: this key is not the one you saved when you first chatted. Do not trust this account until you have checked with them."
+		case known:
+			keyCheck = "matches the key you saved when you first chatted"
+		default:
+			keyCheck = "not saved yet; it is saved when you first chat, and compared every time after"
+		}
+	}
+	fingerprint := crypto.Fingerprint(p.PubKey)
+	return m.openPage("whois @"+p.Handle, func(width int) string {
+		return ui.ProfilePage(width, ui.Profile{Handle: p.Handle, Name: p.Name, Bio: p.Bio, Joined: p.Joined, Online: p.Online}, own, fingerprint, keyCheck)
+	})
+}
+
 func (m *Model) droppedFromGroup(g *groupState) {
 	name := g.secret.Name
 	m.store.History.Forget(m.seqKey(g.secret.GIDHex()))
@@ -890,10 +1037,10 @@ func (m *Model) receiveMessage(frame Event, replay bool) {
 		line.text = cleanText(content.Body)
 		if content.Kind == "file" {
 			line.handle = ""
-			if !shortNamePattern.MatchString(content.Name) {
+			if !files.ShortNamePattern.MatchString(content.Name) {
 				line.text = "[invalid file share]"
 			} else {
-				line.text = fmt.Sprintf("@%s shared \"%s\" (%s). Download with: /download %s DIR", cleanText(content.Handle), content.Name, formatSize(content.Size), content.Name)
+				line.text = fmt.Sprintf("@%s shared \"%s\" (%s). Download with: /download %s DIR", cleanText(content.Handle), content.Name, files.FormatSize(content.Size), content.Name)
 				if !line.self && !replay {
 					m.rememberFile(content.Name, fileRecord{Link: content.Link, Size: content.Size, From: cleanText(content.Handle), At: time.Now().Unix()})
 				}
@@ -958,6 +1105,22 @@ func (m *Model) send(g *groupState, content payload) error {
 
 func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showHelp {
+		if m.pendingSend != nil {
+			// The upload preview: a yes uploads, anything that closes the page cancels.
+			switch key.String() {
+			case "enter", "y", "Y":
+				pending := m.pendingSend
+				m.showHelp, m.pendingSend, m.pageFooter = false, nil, ""
+				return m, tea.Batch(tea.ClearScreen, m.startUpload(pending.target, pending.argument))
+			case "esc", "n", "N", "q":
+				m.notice(m.pendingSend.target, "upload cancelled")
+				m.showHelp, m.pendingSend, m.pageFooter = false, nil, ""
+				return m, tea.ClearScreen
+			}
+			var command tea.Cmd
+			m.helpView, command = m.helpView.Update(key)
+			return m, command
+		}
 		switch key.String() {
 		case "esc", "q", "enter", " ", "ctrl+h", "/":
 			m.showHelp = false
@@ -969,6 +1132,9 @@ func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key.String() {
 	case "tab", "ctrl+n":
+		if key.String() == "tab" && m.suggestionShown() {
+			break // Tab finishes the command being typed
+		}
 		m.switchTo((m.current + 1) % len(m.groups))
 		return m, nil
 	case "shift+tab", "ctrl+p":
@@ -997,12 +1163,32 @@ func (m *Model) updateChat(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var command tea.Cmd
 	m.input, command = m.input.Update(key)
+	// File names depend on what has been typed, so work them out again after every key.
+	if strings.HasPrefix(m.input.Value(), "/upload ") || strings.HasPrefix(m.input.Value(), "/download ") || m.pathMode {
+		m.pathMode = strings.HasPrefix(m.input.Value(), "/upload ") || strings.HasPrefix(m.input.Value(), "/download ")
+		m.refreshSuggestions()
+	}
 	return m, command
+}
+
+// barLines is how many lines the progress bar takes from the chat: one while a transfer is running.
+func (m *Model) barLines() int {
+	if m.progress != nil {
+		return 1
+	}
+	return 0
+}
+
+// layout sizes the chat area to the window, leaving room for the progress bar when there is one.
+func (m *Model) layout() {
+	m.viewport.Height = max(3, m.height-4-m.barLines())
+	m.refresh()
 }
 
 func (m *Model) switchTo(index int) {
 	m.current = index
 	m.groups[index].unread = 0
+	m.fetchOnline()
 	m.refresh()
 }
 
@@ -1014,13 +1200,10 @@ func (m *Model) runCommand(text string) tea.Cmd {
 	switch name {
 	case "/help":
 		// A full-screen guide on a cleared screen; Esc brings the chat back.
-		m.showHelp = true
-		m.helpView.Width, m.helpView.Height = m.width, max(3, m.height-3)
-		m.helpView.SetContent(helpGuide(m.width))
-		m.helpView.GotoTop()
-		return tea.ClearScreen
+		return m.openPage("help", ui.HelpGuide)
 
 	case "/quit", "/exit":
+		m.stopMusic()
 		return tea.Quit
 
 	case "/clear":
@@ -1032,17 +1215,17 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		m.refresh()
 
 	case "/create":
-		secret, err := crypto.NewSecret(cleanText(argument))
-		if err != nil {
-			m.notice(current, err.Error())
-			break
-		}
-		m.addGroup(secret, false)
+		m.createCommand(current, argument)
 
 	case "/join":
 		secret, err := crypto.ParseCode(argument)
 		if err != nil {
-			m.notice(current, err.Error())
+			// Not an invite code: perhaps the name of a public group.
+			if openNamePattern.MatchString(argument) {
+				m.joinByName(current, argument)
+			} else {
+				m.notice(current, "/join takes an invite code or the name of a public group (see /public)")
+			}
 			break
 		}
 		if m.findGroup(secret.GIDHex()) != nil {
@@ -1050,6 +1233,30 @@ func (m *Model) runCommand(text string) tea.Cmd {
 			break
 		}
 		m.addGroup(secret, true)
+
+	case "/public":
+		server := m.server
+		go func() {
+			groups, err := server.OpenGroups()
+			server.report(openListed{groups: groups, err: err})
+		}()
+
+	case "/unlist":
+		if !openNamePattern.MatchString(argument) {
+			m.notice(current, "usage: /unlist NAME (a public group you made)")
+			break
+		}
+		server := m.server
+		go func() { server.report(openUnlisted{name: argument, err: server.UnlistOpenGroup(argument)}) }()
+
+	case "/close":
+		m.closeCommand(current)
+
+	case "/closed":
+		m.closedCommand(current)
+
+	case "/reopen":
+		m.reopenCommand(current, argument)
 
 	case "/dm":
 		peer := strings.ToLower(strings.TrimPrefix(argument, "@"))
@@ -1069,18 +1276,31 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		}
 
 	case "/whois", "/me":
-		own := hex.EncodeToString(m.identity.PublicKey().Bytes())
 		peer := strings.ToLower(strings.TrimPrefix(argument, "@"))
-		if name == "/me" || peer == m.session.handle {
-			m.notice(current, "your key fingerprint: "+crypto.Fingerprint(own))
-		} else if pinned, known := m.vault.Pins[peer]; known {
-			m.notice(current, "@"+peer+" key fingerprint: "+crypto.Fingerprint(pinned))
-		} else {
-			m.notice(current, "no chat with @"+peer+" yet; /dm "+peer+" shows their fingerprint")
+		if name == "/me" || peer == "" {
+			peer = m.session.handle
+		}
+		if !crypto.ValidHandle(peer) {
+			m.notice(current, "usage: /whois HANDLE")
+			break
+		}
+		m.lookupProfile(peer)
+
+	case "/bio":
+		switch {
+		case argument == "":
+			m.lookupProfile(m.session.handle)
+		default:
+			bio := argument
+			if strings.EqualFold(argument, "clear") {
+				bio = ""
+			}
+			server := m.server
+			go func() { server.report(bioSaved{bio: bio, err: server.SetBio(bio)}) }()
 		}
 
 	case "/upload":
-		return m.startUpload(current, argument)
+		return m.previewUpload(current, argument)
 
 	case "/download":
 		return m.startDownload(current, argument)
@@ -1094,7 +1314,7 @@ func (m *Model) runCommand(text string) tea.Cmd {
 			if record.From != "" {
 				who = "@" + record.From
 			}
-			m.notice(current, fmt.Sprintf("%s  %s  from %s  %s", name, formatSize(record.Size), who, time.Unix(record.At, 0).Format("2006-01-02 15:04")))
+			m.notice(current, fmt.Sprintf("%s  %s  from %s  %s", name, files.FormatSize(record.Size), who, time.Unix(record.At, 0).Format("2006-01-02 15:04")))
 		}
 
 	case "/link":
@@ -1114,6 +1334,8 @@ func (m *Model) runCommand(text string) tea.Cmd {
 		default:
 			if err := m.send(current, payload{Kind: "file", Handle: m.session.handle, Name: argument, Link: record.Link, Size: record.Size}); err != nil {
 				m.notice(current, "not sent: "+err.Error())
+			} else {
+				m.reportShare(current, argument, record.Size)
 			}
 		}
 
@@ -1161,6 +1383,33 @@ func (m *Model) runCommand(text string) tea.Cmd {
 			break
 		}
 		m.switchTo(index)
+
+	case "/music":
+		m.notice(current, "asking the server for the music library...")
+		m.server.enqueue(func() {
+			tracks, err := m.server.Music()
+			m.server.report(musicList{tracks: tracks, err: err})
+		})
+
+	case "/play":
+		m.playCommand(current, argument)
+
+	case "/stop":
+		if m.playing == nil && !m.list.Active() {
+			m.notice(current, "nothing is playing")
+		} else {
+			m.notice(current, "stopped the music")
+			m.stopMusic()
+		}
+
+	case "/next":
+		m.skipCommand(current)
+
+	case "/repeat":
+		m.repeatCommand(current, strings.ToLower(argument))
+
+	case "/shuffle":
+		m.shuffleCommand(current, strings.ToLower(argument))
 
 	case "/kick":
 		handle := strings.ToLower(strings.TrimPrefix(argument, "@"))
@@ -1213,6 +1462,9 @@ func (m *Model) addGroup(secret *crypto.Secret, joining bool) {
 		m.notice(m.groups[m.current], "not connected to the server")
 		return
 	}
+	m.forgetClosed(func(c closedChat) bool {
+		return c.Code != "" && c.Code == secret.Code()
+	})
 	g := &groupState{secret: secret, adding: true, announced: joining}
 	m.groups = append(m.groups, g)
 	if joining {
@@ -1232,16 +1484,16 @@ func (m *Model) refresh() {
 	var lines []string
 	wrap := lipgloss.NewStyle().Width(m.viewport.Width)
 	for _, line := range m.groups[m.current].entries {
-		stamp := dimStyle.Render(line.when.Format("15:04"))
+		stamp := ui.Dim.Render(line.when.Format("15:04"))
 		switch {
 		case line.raw:
 			lines = append(lines, line.text)
 		case line.handle == "":
-			lines = append(lines, wrap.Render(stamp+" "+dimStyle.Render(line.text)))
+			lines = append(lines, wrap.Render(stamp+" "+ui.Dim.Render(line.text)))
 		case line.self:
-			lines = append(lines, wrap.Render(stamp+" "+selfStyle.Render("you")+": "+line.text))
+			lines = append(lines, wrap.Render(stamp+" "+ui.Self.Render("you")+": "+line.text))
 		default:
-			lines = append(lines, wrap.Render(stamp+" "+otherStyle.Render("@"+line.handle)+": "+line.text))
+			lines = append(lines, wrap.Render(stamp+" "+ui.Other.Render("@"+line.handle)+": "+line.text))
 		}
 	}
 	m.viewport.SetContent(strings.Join(lines, "\n"))
@@ -1258,8 +1510,11 @@ func (m *Model) View() string {
 		return m.authView()
 	}
 	if m.showHelp {
-		title := titleStyle.Render("Pipechat") + dimStyle.Render("  help")
-		footer := dimStyle.Render("↑/↓ PgUp/PgDn scroll  ·  Esc, Enter or q to go back")
+		title := ui.Title.Render("Pipechat") + ui.Dim.Render("  "+m.pageTitle)
+		footer := ui.Dim.Render("↑/↓ PgUp/PgDn scroll  ·  Esc, Enter or q to go back")
+		if m.pageFooter != "" {
+			footer = ui.Key.Render(m.pageFooter)
+		}
 		return title + "\n\n" + m.helpView.View() + "\n" + footer
 	}
 	status := "● online"
@@ -1269,7 +1524,12 @@ func (m *Model) View() string {
 	if m.transfer != "" {
 		status += "  ⇅ " + m.transfer
 	}
-	header := titleStyle.Render("Pipechat") + dimStyle.Render("  @"+m.session.handle+"  "+status)
+	if m.playing != nil {
+		status += "  ♪ " + m.playing.track.Title + m.list.Modes()
+	} else if m.loadingMusic {
+		status += "  ♪ loading..."
+	}
+	header := ui.Title.Render("Pipechat") + ui.Dim.Render("  @"+m.session.handle+"  "+status)
 
 	var names []string
 	for index, g := range m.groups {
@@ -1281,22 +1541,29 @@ func (m *Model) View() string {
 			label += fmt.Sprintf(" (%d)", g.unread)
 		}
 		if index == m.current {
-			names = append(names, activeStyle.Render("▸ "+label))
+			names = append(names, ui.Active.Render("▸ "+label))
 		} else {
-			names = append(names, dimStyle.Render("  "+label))
+			names = append(names, ui.Dim.Render("  "+label))
 		}
 	}
-	sidebar := sidebarStyle.Height(m.height - 2).Render(strings.Join(names, "\n"))
+	list := strings.Join(names, "\n")
+	if panel := m.onlinePanel(m.height - 2 - m.barLines() - len(names) - 3); panel != "" {
+		list += "\n\n" + panel
+	}
+	sidebar := ui.Sidebar.Height(m.height - 2 - m.barLines()).Render(list)
 
 	title := "welcome"
 	if secret := m.groups[m.current].secret; secret != nil {
-		title = secret.Name + dimStyle.Render("  · end-to-end encrypted")
+		title = secret.Name + ui.Dim.Render("  · end-to-end encrypted")
 		if m.groups[m.current].direct {
-			title += dimStyle.Render(" · direct")
+			title += ui.Dim.Render(" · direct")
 		}
 	}
-	chat := lipgloss.JoinVertical(lipgloss.Left, activeStyle.Render(title), m.viewport.View())
+	chat := lipgloss.JoinVertical(lipgloss.Left, ui.Active.Render(title), m.viewport.View())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, " "+strings.ReplaceAll(chat, "\n", "\n "))
+	if m.progress != nil {
+		return header + "\n" + body + "\n" + ui.TransferLine(*m.progress, m.width, time.Now()) + "\n" + m.input.View()
+	}
 	return header + "\n" + body + "\n" + m.input.View()
 }
 
@@ -1321,7 +1588,7 @@ func (m *Model) rememberFile(name string, record fileRecord) {
 // startUpload handles /upload PATH [-name SHORT]: it packs, encrypts and uploads in the background.
 func (m *Model) startUpload(current *groupState, argument string) tea.Cmd {
 	var source, name string
-	arguments := SplitArguments(argument)
+	arguments := files.SplitArguments(argument)
 	for index := 0; index < len(arguments); index++ {
 		switch {
 		case (arguments[index] == "-name" || arguments[index] == "--name") && index+1 < len(arguments):
@@ -1338,7 +1605,7 @@ func (m *Model) startUpload(current *groupState, argument string) tea.Cmd {
 		m.notice(current, "usage: /upload PATH [-name SHORTNAME]")
 		return nil
 	}
-	source = expandHome(source)
+	source = files.ExpandHome(source)
 	info, err := os.Stat(source)
 	if err != nil {
 		m.notice(current, "cannot read "+source+": "+err.Error())
@@ -1346,10 +1613,10 @@ func (m *Model) startUpload(current *groupState, argument string) tea.Cmd {
 	}
 	if name == "" {
 		absolute, _ := filepath.Abs(source)
-		name = ShortName(filepath.Base(absolute))
+		name = files.ShortName(filepath.Base(absolute))
 	}
 	switch {
-	case !shortNamePattern.MatchString(name):
+	case !files.ShortNamePattern.MatchString(name):
 		m.notice(current, "short name must be 1-40 characters: letters, digits, . _ -")
 		return nil
 	case m.busy:
@@ -1365,11 +1632,12 @@ func (m *Model) startUpload(current *groupState, argument string) tea.Cmd {
 	}
 	m.busy, m.transfer, m.uploadTarget = true, "uploading "+name, current
 	m.notice(current, "uploading "+kind+" "+source+" as \""+name+"\" (encrypted before it leaves this machine)...")
-	return func() tea.Msg { return m.server.UploadPath(source, name) }
+	return func() tea.Msg { return files.Upload(m.server, source, name) }
 }
 
-func (m *Model) finishUpload(result UploadDone) {
-	m.busy, m.transfer = false, ""
+func (m *Model) finishUpload(result files.Done) {
+	m.busy, m.transfer, m.progress = false, "", nil
+	m.layout()
 	target := m.uploadTarget
 	m.uploadTarget = nil
 	if target == nil || m.findGroupState(target) < 0 {
@@ -1380,12 +1648,13 @@ func (m *Model) finishUpload(result UploadDone) {
 		return
 	}
 	m.rememberFile(result.Name, fileRecord{Link: result.Link, Size: result.Bytes, At: time.Now().Unix()})
-	summary := fmt.Sprintf("uploaded \"%s\": %d files, %s", result.Name, result.Files, formatSize(result.Bytes))
+	summary := fmt.Sprintf("uploaded \"%s\": %d files, %s", result.Name, result.Files, files.FormatSize(result.Bytes))
 	if target.secret == nil {
 		m.notice(target, summary+". Get the link with /link "+result.Name+", or open a chat and /share "+result.Name)
 		return
 	}
 	m.notice(target, summary)
+	m.reportShare(target, result.Name, result.Bytes)
 	if err := m.send(target, payload{Kind: "file", Handle: m.session.handle, Name: result.Name, Link: result.Link, Size: result.Bytes}); err != nil {
 		m.notice(target, "link not sent: "+err.Error()+" (use /share "+result.Name+" later)")
 	}
@@ -1402,7 +1671,7 @@ func (m *Model) findGroupState(target *groupState) int {
 
 // startDownload handles /download SHORTNAME|LINK [DIR].
 func (m *Model) startDownload(current *groupState, argument string) tea.Cmd {
-	arguments := SplitArguments(argument)
+	arguments := files.SplitArguments(argument)
 	if len(arguments) == 0 || len(arguments) > 2 {
 		m.notice(current, "usage: /download SHORTNAME|LINK [TARGET_DIR]  (default: current directory)")
 		return nil
@@ -1413,7 +1682,7 @@ func (m *Model) startDownload(current *groupState, argument string) tea.Cmd {
 	}
 	target := "."
 	if len(arguments) == 2 {
-		target = expandHome(arguments[1])
+		target = files.ExpandHome(arguments[1])
 	}
 	name, link := arguments[0], arguments[0]
 	if record, found := m.vault.Files[name]; found {
@@ -1424,14 +1693,14 @@ func (m *Model) startDownload(current *groupState, argument string) tea.Cmd {
 	} else {
 		name = "file"
 	}
-	address, _, err := ParseLink(link)
+	address, _, err := files.ParseLink(link)
 	if err != nil {
 		m.notice(current, err.Error())
 		return nil
 	}
 	m.busy, m.transfer = true, "downloading "+name
 	m.notice(current, "downloading "+name+" from "+strings.SplitN(strings.TrimPrefix(strings.TrimPrefix(address, "http://"), "https://"), "/", 2)[0]+" to "+target+"...")
-	return func() tea.Msg { return m.server.DownloadLink(link, target, name) }
+	return func() tea.Msg { return files.Download(m.server, link, target, name) }
 }
 
 // ---- connect screen ----
@@ -1463,25 +1732,25 @@ func (m *Model) updateConnect(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) connectView() string {
-	status := dimStyle.Render("Ctrl+C to quit")
+	status := ui.Dim.Render("Ctrl+C to quit")
 	switch {
 	case m.connectError != "":
-		status = errorStyle.Render(m.connectError)
+		status = ui.Error.Render(m.connectError)
 	case m.server != nil:
-		status = dimStyle.Render("connecting to " + m.server.URL() + "...")
+		status = ui.Dim.Render("connecting to " + m.server.URL() + "...")
 	}
 	lines := []string{
-		titleStyle.Render("Connect to a chat server"),
+		ui.Title.Render("Connect to a chat server"),
 		"",
 		"Type /connect followed by the server's address, for example:",
-		dimStyle.Render("  /connect pipechat.kibandaskimart.com"),
-		dimStyle.Render("  /connect 192.168.1.5:7777"),
+		ui.Dim.Render("  /connect pipechat.kibandaskimart.com"),
+		ui.Dim.Render("  /connect 192.168.1.5:7777"),
 		"",
 		m.connectInput.View(),
 		"",
 		status,
 	}
-	box := authBoxStyle.Render(strings.Join(lines, "\n"))
+	box := ui.AuthBox.Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(max(m.width, 1), max(m.height, 1), lipgloss.Center, lipgloss.Center, box)
 }
 

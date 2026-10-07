@@ -10,6 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"pipechat/internal/client/music"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,6 +111,9 @@ func (s *Server) emit(message tea.Msg) {
 
 func (s *Server) URL() string { return s.url }
 
+// Emit lets uploads and downloads report progress to the screen (it is files.Env).
+func (s *Server) Emit(message any) { s.emit(message) }
+
 func (s *Server) Token() string {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -158,6 +164,8 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string { return e.Message }
+
+func asAPIError(err error, target **apiError) bool { return errors.As(err, target) }
 
 // Conflict reports whether the server answered 409 (already exists).
 func Conflict(err error) bool {
@@ -246,10 +254,30 @@ func (s *Server) SaveVault(vault []byte) error {
 	return s.call("PUT", "/api/vault", map[string]any{"vault": vault}, nil)
 }
 
+// Profile is what the server knows about a user that others may see.
+type Profile struct {
+	Handle string `json:"handle"`
+	PubKey string `json:"pubkey"`
+	Name   string `json:"name"`
+	Bio    string `json:"bio"`
+	Joined int64  `json:"joined"` // unix seconds
+	Online bool   `json:"online"`
+}
+
+func (s *Server) LookupProfile(handle string) (Profile, error) {
+	var profile Profile
+	err := s.call("GET", "/api/users/"+handle, nil, &profile)
+	return profile, err
+}
+
 func (s *Server) LookupUser(handle string) (publicKey string, err error) {
-	var result struct{ PubKey string }
-	err = s.call("GET", "/api/users/"+handle, nil, &result)
-	return result.PubKey, err
+	profile, err := s.LookupProfile(handle)
+	return profile.PubKey, err
+}
+
+// SetBio changes your own bio.
+func (s *Server) SetBio(bio string) error {
+	return s.call("PUT", "/api/profile", map[string]any{"bio": bio}, nil)
 }
 
 func (s *Server) NotifyDirect(handle string) error {
@@ -337,4 +365,92 @@ func (s *Server) SyncEscrow(webGroup int64, sealed []byte) error {
 // KickMember removes someone from a website group; only the group's creator may.
 func (s *Server) KickMember(groupID string, handle string) error {
 	return s.call("POST", "/api/sync/kick", map[string]any{"gid": groupID, "handle": handle}, nil)
+}
+
+func (s *Server) Music() ([]music.Track, error) {
+	var tracks []music.Track
+	err := s.call("GET", "/api/music", nil, &tracks)
+	return tracks, err
+}
+
+// DownloadTrack saves a track to path. It is written to a temporary name first, so an interrupted
+// download is never mistaken for a whole song later.
+func (s *Server) DownloadTrack(id int64, path string) error {
+	request, err := http.NewRequest("GET", s.url+"/api/music/"+strconv.FormatInt(id, 10)+"/file", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+s.Token())
+	// A song can take longer to arrive than the 30 seconds that suit small requests.
+	response, err := (&http.Client{Timeout: 10 * time.Minute}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		var failure struct{ Error string }
+		json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&failure)
+		if failure.Error == "" {
+			failure.Error = response.Status
+		}
+		return &apiError{Status: response.StatusCode, Message: failure.Error}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temporary := path + ".part"
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(file, response.Body)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(temporary)
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+// OpenGroup is a public group: anyone can join it by name.
+type OpenGroup struct {
+	Name    string `json:"name"`
+	Creator string `json:"creator"`
+	Code    string `json:"code"` // only when asking for one group
+}
+
+func (s *Server) OpenGroups() ([]OpenGroup, error) {
+	var groups []OpenGroup
+	err := s.call("GET", "/api/open", nil, &groups)
+	return groups, err
+}
+
+func (s *Server) GetOpenGroup(name string) (OpenGroup, error) {
+	var group OpenGroup
+	err := s.call("GET", "/api/open/"+url.PathEscape(name), nil, &group)
+	return group, err
+}
+
+// ListOpenGroup makes a group you are in public under a name.
+func (s *Server) ListOpenGroup(name string, code string) error {
+	return s.call("POST", "/api/open", map[string]any{"name": name, "code": code}, nil)
+}
+
+func (s *Server) UnlistOpenGroup(name string) error {
+	return s.call("DELETE", "/api/open/"+url.PathEscape(name), nil, nil)
+}
+
+// Online lists the handles that have a chat open right now.
+func (s *Server) Online(groupID string) ([]string, error) {
+	var handles []string
+	err := s.call("GET", "/api/groups/"+groupID+"/online", nil, &handles)
+	return handles, err
+}
+
+// ReportShare tells the server a file was shared in a chat, so a website group's page can list it.
+// It is best effort: chats that are not website groups answer 404, which is fine.
+func (s *Server) ReportShare(groupID string, name string, size int64) {
+	s.call("POST", "/api/sync/shares", map[string]any{"gid": groupID, "name": name, "size": size}, nil)
 }

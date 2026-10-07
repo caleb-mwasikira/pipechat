@@ -37,6 +37,7 @@ class AdminController extends Controller
                 'Messages sent (all time)' => $counter('messages_sent'),
                 'Messages stored now' => $count('messages'),
                 'Files shared (all time)' => $counter('files_sent'),
+                'Music tracks' => $count('tracks'),
                 'Admins' => User::where('is_admin', true)->count(),
             ],
             'signups' => $signups,

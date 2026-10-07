@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -245,7 +246,42 @@ func lookupUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no user @"+handle)
 		return
 	}
-	writeJSON(w, http.StatusOK, userResponse{Handle: handle, PubKey: account.PubKey})
+	response := userResponse{Handle: handle, PubKey: account.PubKey}
+	if profile, err := database.GetProfile(r.Context(), Pool, handle); err == nil && profile != nil {
+		response.Name, response.Bio, response.Joined = profile.Name, profile.Bio, profile.Joined
+	}
+	live.mutex.Lock()
+	for other := range live.online[handle] {
+		response.Online = response.Online || other.socket // logged in with the chat open, not just a leftover session
+	}
+	live.mutex.Unlock()
+	writeJSON(w, http.StatusOK, response)
+}
+
+const bioLimit = 280
+
+// PUT /api/profile: change your own bio, which /whois shows to everyone.
+func saveBio(w http.ResponseWriter, r *http.Request) {
+	var request bioRequest
+	if !readJSON(w, r, &request) {
+		return
+	}
+	// One line of plain text: control characters and line breaks become spaces.
+	bio := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return ' '
+		}
+		return r
+	}, request.Bio)), " ")
+	if utf8.RuneCountInString(bio) > bioLimit {
+		writeError(w, http.StatusBadRequest, "a bio can have at most 280 characters")
+		return
+	}
+	if err := database.SetBio(r.Context(), Pool, currentSession(r).userID, bio); err != nil {
+		serverError(w, "save bio", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // POST /api/direct/{handle}: "I opened a direct chat with you". The notice is kept

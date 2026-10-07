@@ -5,7 +5,9 @@ use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DownloadController;
 use App\Http\Controllers\GroupController;
+use App\Http\Controllers\MusicController;
 use App\Http\Controllers\PasswordResetController;
+use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
 
 Route::view('/', 'home')->name('home');
@@ -28,9 +30,18 @@ Route::middleware('guest')->group(function () {
 
 Route::middleware('auth')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
+    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile');
+    Route::put('/profile', [ProfileController::class, 'update'])->name('profile.update');
+    Route::get('/music', [MusicController::class, 'index'])->name('music');
+    Route::post('/music', [MusicController::class, 'store'])->middleware('throttle:20,10')->name('music.store');
+    Route::get('/music/{track}/audio', [MusicController::class, 'audio'])->whereNumber('track')->name('music.audio');
+    Route::delete('/music/{track}', [MusicController::class, 'destroy'])->whereNumber('track')->name('music.destroy');
     Route::redirect('/dashboard', '/groups')->name('dashboard');
     Route::get('/groups', [GroupController::class, 'index'])->name('groups');
     Route::post('/groups', [GroupController::class, 'store'])->name('groups.store');
+    Route::post('/groups/{group}/join', [GroupController::class, 'join'])->whereNumber('group')->middleware('throttle:20,1')->name('groups.join');
+    Route::post('/groups/{group}/visibility', [GroupController::class, 'visibility'])->whereNumber('group')->name('groups.visibility');
+    Route::get('/groups/{group}', [GroupController::class, 'show'])->whereNumber('group')->name('groups.show');
     Route::post('/groups/{group}/invite', [GroupController::class, 'invite'])->middleware('throttle:20,1')->name('groups.invite');
     Route::post('/groups/{group}/leave', [GroupController::class, 'leave'])->name('groups.leave');
     Route::post('/invites/{invite}/{answer}', [GroupController::class, 'respond'])->name('invites.respond');

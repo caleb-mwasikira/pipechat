@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 )
 
 var (
@@ -342,4 +343,59 @@ func KickMember(ctx context.Context, pool *sql.DB, ownerID int64, gid string, ha
 		}
 	}
 	return transaction.Commit()
+}
+
+// Profile is what people can see about a user with /whois.
+type Profile struct {
+	Name   string
+	Bio    string
+	Joined int64 // unix seconds
+}
+
+// GetProfile returns nil when the handle has no website user behind it.
+func GetProfile(ctx context.Context, pool *sql.DB, handle string) (*Profile, error) {
+	var profile Profile
+	var created sql.NullTime
+	err := pool.QueryRowContext(ctx, `
+		SELECT u.name, COALESCE(u.bio, ''), u.created_at
+		FROM accounts a JOIN users u ON u.id = a.user_id WHERE a.handle = $1`, handle).Scan(&profile.Name, &profile.Bio, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if created.Valid {
+		profile.Joined = created.Time.Unix()
+	}
+	return &profile, err
+}
+
+// SetBio saves a user's bio.
+func SetBio(ctx context.Context, pool *sql.DB, userID int64, bio string) error {
+	_, err := pool.ExecContext(ctx, `UPDATE users SET bio = NULLIF($1, ''), updated_at = now() WHERE id = $2`, bio, userID)
+	return err
+}
+
+// SetPresence records that a person has the chat open (or just closed it). The website reads it to show
+// who is online; it counts a person as online only while last_seen is recent, so a crash cannot leave
+// anyone online for ever.
+func SetPresence(ctx context.Context, pool *sql.DB, handle string, online bool) error {
+	_, err := pool.ExecContext(ctx, `
+		INSERT INTO presence (handle, online, last_seen) VALUES ($1, $2, extract(epoch FROM now())::bigint)
+		ON CONFLICT (handle) DO UPDATE SET online = EXCLUDED.online, last_seen = EXCLUDED.last_seen`, handle, online)
+	return err
+}
+
+// RecordShare notes that a member shared a file in a website group, for the group's page. It returns false
+// when the chat is not a website group, or the person is not in it.
+func RecordShare(ctx context.Context, pool *sql.DB, userID int64, gid string, name string, size int64, expires time.Time) (bool, error) {
+	result, err := pool.ExecContext(ctx, `
+		INSERT INTO chat_group_files (group_id, user_id, name, size, expires_at, created_at)
+		SELECT g.id, $1, $3, $4, $5, now()
+		FROM chat_groups g
+		JOIN chat_group_members m ON m.group_id = g.id AND m.user_id = $1
+		WHERE g.gid = $2`, userID, gid, name, size, expires)
+	if err != nil {
+		return false, err
+	}
+	rows, _ := result.RowsAffected()
+	return rows == 1, nil
 }

@@ -7,6 +7,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+
+	"pipechat/internal/database"
 )
 
 const (
@@ -36,7 +38,23 @@ func chatSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	stop := make(chan struct{})
 	own.stream = stop
+	own.socket = true
 	live.mutex.Unlock()
+	database.SetPresence(ctx, Pool, own.handle, true)
+	defer func() {
+		live.mutex.Lock()
+		if own.stream == stop { // not already replaced by a newer socket
+			own.stream, own.socket = nil, false
+		}
+		stillOnline := false
+		for other := range live.online[own.handle] {
+			stillOnline = stillOnline || other.socket
+		}
+		live.mutex.Unlock()
+		if !stillOnline {
+			database.SetPresence(context.Background(), Pool, own.handle, false)
+		}
+	}()
 
 	ping := time.NewTicker(webSocketPing)
 	defer ping.Stop()
@@ -53,6 +71,7 @@ func chatSocket(w http.ResponseWriter, r *http.Request) {
 			live.mutex.Lock()
 			own.lastSeen = time.Now()
 			live.mutex.Unlock()
+			database.SetPresence(ctx, Pool, own.handle, true) // so the website knows we are still here
 			pingContext, cancel := context.WithTimeout(ctx, webSocketTimeout)
 			err := connection.Ping(pingContext)
 			cancel()

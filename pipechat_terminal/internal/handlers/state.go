@@ -38,6 +38,7 @@ type session struct {
 	lastSeen time.Time
 	closed   chan struct{} // closed when the session ends
 	stream   chan struct{} // closed to stop the current event stream when a new one starts
+	socket   bool          // a WebSocket is open: the person has the chat running
 }
 
 // live lists who is connected. Its mutex guards everything in it and the sessions' fields.

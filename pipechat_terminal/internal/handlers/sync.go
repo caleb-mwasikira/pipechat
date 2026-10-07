@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -228,5 +229,29 @@ func syncKick(w http.ResponseWriter, r *http.Request) {
 		deliver(kicked, event{Type: "kick", GID: request.GID})
 	}
 	live.mutex.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/sync/shares: a member shared a file in a chat. If it is a website group, its page lists the file
+// (name and size only: the file itself stays encrypted and its key is only in the link in the chat).
+func syncShare(w http.ResponseWriter, r *http.Request) {
+	var request shareRequest
+	if !readJSON(w, r, &request) {
+		return
+	}
+	if !groupIDPattern.MatchString(request.GID) || request.Name == "" || len(request.Name) > 80 || request.Size < 0 {
+		writeError(w, http.StatusBadRequest, "bad share")
+		return
+	}
+	expires := time.Now().Add(time.Duration(Config.FileDays) * 24 * time.Hour)
+	ok, err := database.RecordShare(r.Context(), Pool, currentSession(r).userID, request.GID, request.Name, request.Size, expires)
+	if err != nil {
+		serverError(w, "record share", err)
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "not a website group you are in")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

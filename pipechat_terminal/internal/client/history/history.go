@@ -1,4 +1,7 @@
-package client
+// Package history keeps the messages shown in each chat on this computer, so they are still there the next
+// time the terminal starts. They are stored as the server sent them, sealed with the group's key: the file
+// holds no readable text, and the key is only in the account's vault.
+package history
 
 import (
 	"bufio"
@@ -11,15 +14,12 @@ import (
 	"sync"
 )
 
-// The messages shown in each chat are kept on this computer, so they are still there the next time the
-// terminal starts. They are stored as the server sent them, sealed with the group's key: the file
-// holds no readable text, and the key is only in the account's vault.
-//
 // It is a log of lines, one JSON object per line, so saving a message is one small append.
 
-const historyKept = 1000 // messages kept per chat
+// Kept is how many messages are kept per chat.
+const Kept = 1000
 
-type historyRecord struct {
+type Record struct {
 	Key   string `json:"k"` // "handle/group id"
 	Seq   uint64 `json:"s"`
 	TS    int64  `json:"t,omitempty"`
@@ -27,17 +27,17 @@ type historyRecord struct {
 	Clear bool   `json:"x,omitempty"` // /clear: everything up to Seq is no longer shown
 }
 
-type History struct {
+type Log struct {
 	mutex   sync.Mutex
 	path    string
-	records map[string][]historyRecord // oldest first, without what was cleared
-	last    map[string]uint64          // newest sequence number ever seen, even if cleared
-	lines   int                        // lines in the file, to know when it is worth tidying
+	records map[string][]Record // oldest first, without what was cleared
+	last    map[string]uint64   // newest sequence number ever seen, even if cleared
+	lines   int                 // lines in the file, to know when it is worth tidying
 }
 
-// LoadHistory reads the file, or starts empty when there is none.
-func LoadHistory(path string) (*History, error) {
-	h := &History{path: path, records: map[string][]historyRecord{}, last: map[string]uint64{}}
+// Load reads the file, or starts empty when there is none.
+func Load(path string) (*Log, error) {
+	h := &Log{path: path, records: map[string][]Record{}, last: map[string]uint64{}}
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return h, nil
@@ -49,7 +49,7 @@ func LoadHistory(path string) (*History, error) {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for scanner.Scan() {
-		var record historyRecord
+		var record Record
 		if json.Unmarshal(scanner.Bytes(), &record) != nil {
 			continue // a half-written last line, or damage: skip it
 		}
@@ -63,7 +63,7 @@ func LoadHistory(path string) (*History, error) {
 }
 
 // apply updates the in-memory view with one record. Must be called with the mutex held or before sharing.
-func (h *History) apply(record historyRecord) {
+func (h *Log) apply(record Record) {
 	h.last[record.Key] = max(h.last[record.Key], record.Seq)
 	list := h.records[record.Key]
 	if record.Clear {
@@ -80,16 +80,16 @@ func (h *History) apply(record historyRecord) {
 	if position < len(list) && list[position].Seq == record.Seq {
 		return // already have it
 	}
-	list = append(list, historyRecord{})
+	list = append(list, Record{})
 	copy(list[position+1:], list[position:])
 	list[position] = record
-	if len(list) > historyKept {
-		list = list[len(list)-historyKept:]
+	if len(list) > Kept {
+		list = list[len(list)-Kept:]
 	}
 	h.records[record.Key] = list
 }
 
-func (h *History) total() int {
+func (h *Log) total() int {
 	count := 0
 	for _, list := range h.records {
 		count += len(list)
@@ -98,21 +98,21 @@ func (h *History) total() int {
 }
 
 // Last is the newest message already seen in a chat: what to ask the server for more than.
-func (h *History) Last(key string) uint64 {
+func (h *Log) Last(key string) uint64 {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	return h.last[key]
 }
 
 // Messages are a chat's saved messages, oldest first.
-func (h *History) Messages(key string) []historyRecord {
+func (h *Log) Messages(key string) []Record {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	return append([]historyRecord(nil), h.records[key]...)
+	return append([]Record(nil), h.records[key]...)
 }
 
 // Add saves one message. It is ignored if it is already there.
-func (h *History) Add(key string, seq uint64, ts int64, ciphertext []byte) error {
+func (h *Log) Add(key string, seq uint64, ts int64, ciphertext []byte) error {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	for _, old := range h.records[key] {
@@ -120,22 +120,22 @@ func (h *History) Add(key string, seq uint64, ts int64, ciphertext []byte) error
 			return nil
 		}
 	}
-	record := historyRecord{Key: key, Seq: seq, TS: ts, CT: ciphertext}
+	record := Record{Key: key, Seq: seq, TS: ts, CT: ciphertext}
 	h.apply(record)
 	return h.append(record)
 }
 
 // Clear hides everything seen so far, but remembers how far we got, so the server does not send it again.
-func (h *History) Clear(key string) error {
+func (h *Log) Clear(key string) error {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	record := historyRecord{Key: key, Seq: h.last[key], Clear: true}
+	record := Record{Key: key, Seq: h.last[key], Clear: true}
 	h.apply(record)
 	return h.append(record)
 }
 
 // Forget removes a chat completely, for when we leave it.
-func (h *History) Forget(key string) error {
+func (h *Log) Forget(key string) error {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	delete(h.records, key)
@@ -143,7 +143,7 @@ func (h *History) Forget(key string) error {
 	return h.rewrite()
 }
 
-func (h *History) append(record historyRecord) error {
+func (h *Log) append(record Record) error {
 	if err := os.MkdirAll(filepath.Dir(h.path), 0o700); err != nil {
 		return err
 	}
@@ -161,7 +161,7 @@ func (h *History) append(record historyRecord) error {
 }
 
 // rewrite saves the current state as a fresh, short file. Must be called with the mutex held or before sharing.
-func (h *History) rewrite() error {
+func (h *Log) rewrite() error {
 	var out bytes.Buffer
 	keys := make([]string, 0, len(h.last))
 	for key := range h.last {
@@ -173,7 +173,7 @@ func (h *History) rewrite() error {
 		list := h.records[key]
 		if len(list) == 0 {
 			// Nothing to show, but remember how far this chat got.
-			line, _ := json.Marshal(historyRecord{Key: key, Seq: h.last[key], Clear: true})
+			line, _ := json.Marshal(Record{Key: key, Seq: h.last[key], Clear: true})
 			out.Write(line)
 			out.WriteByte('\n')
 			lines++

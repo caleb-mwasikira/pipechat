@@ -28,6 +28,14 @@ type vaultRequest struct {
 type userResponse struct {
 	Handle string `json:"handle"`
 	PubKey string `json:"pubkey"`
+	Name   string `json:"name,omitempty"`
+	Bio    string `json:"bio,omitempty"`
+	Joined int64  `json:"joined,omitempty"` // unix seconds
+	Online bool   `json:"online"`
+}
+
+type bioRequest struct {
+	Bio string `json:"bio"`
 }
 
 type createGroupRequest struct {
@@ -91,4 +99,10 @@ type escrowRequest struct {
 type kickRequest struct {
 	GID    string `json:"gid"`
 	Handle string `json:"handle"`
+}
+
+type shareRequest struct {
+	GID  string `json:"gid"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }

@@ -35,7 +35,7 @@
                 @php $navClass = fn ($active) => 'whitespace-nowrap border-b-2 px-2 py-5 font-mono text-xs font-bold uppercase tracking-wider transition-colors '.($active ? 'border-cyber-neon text-cyber-neon' : 'border-transparent text-gray-400 hover:text-white'); @endphp
                 <a href="{{ route('download') }}" class="{{ $navClass(request()->routeIs('download')) }}">Download</a>
                 @auth
-                    <a href="{{ route('dashboard') }}" class="{{ $navClass(request()->routeIs('dashboard', 'groups', 'admin', 'admin.*')) }}">Dashboard</a>
+                    <a href="{{ route('dashboard') }}" class="{{ $navClass(request()->routeIs('dashboard', 'groups', 'groups.*', 'music', 'profile', 'admin', 'admin.*')) }}">Dashboard</a>
                 @endauth
                 @guest
                     <a href="{{ route('login') }}" class="whitespace-nowrap border border-cyber-600 px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-gray-300 transition-all hover:border-cyber-neon hover:text-cyber-neon">Login</a>
@@ -79,7 +79,7 @@
     </div>
 
     @auth
-        @if (request()->routeIs('groups', 'admin', 'admin.*'))
+        @if (request()->routeIs('groups', 'groups.*', 'music', 'profile', 'admin', 'admin.*'))
             <div class="mx-auto flex w-full max-w-screen-2xl flex-grow">
                 <aside class="hidden w-60 shrink-0 border-r border-cyber-700 bg-cyber-800/40 md:block">
                     <div class="sticky top-16">@include('partials.dashboard-menu')</div>

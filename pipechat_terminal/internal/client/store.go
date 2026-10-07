@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"pipechat/internal/client/history"
 )
 
 // Store is what the client remembers between runs: which server, who logged in last, and the messages shown in
@@ -14,9 +15,9 @@ import (
 // vault on the server.
 type Store struct {
 	path      string
-	ServerURL string   `json:"server_url"` // the chat server connected to last time
-	LastEmail string   `json:"last_email"` // pre-fills the login screen
-	History   *History `json:"-"`          // the messages shown in each chat, kept between runs (history.jsonl)
+	ServerURL string       `json:"server_url"` // the chat server connected to last time
+	LastEmail string       `json:"last_email"` // pre-fills the login screen
+	History   *history.Log `json:"-"`          // the messages shown in each chat, kept between runs (history.jsonl)
 }
 
 // DefaultStorePath is ~/.config/pipechat/client.json (or the platform equivalent).
@@ -39,7 +40,7 @@ func LoadStore(path string) (*Store, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	history, err := LoadHistory(filepath.Join(filepath.Dir(path), "history.jsonl"))
+	history, err := history.Load(filepath.Join(filepath.Dir(path), "history.jsonl"))
 	if err != nil {
 		return nil, err
 	}
